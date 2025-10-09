@@ -1,0 +1,4 @@
+@import "tailwindcss";
+
+/* optional small tweaks */
+html, body, #__next { height: 100%; margin: 0; }

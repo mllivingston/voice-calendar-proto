@@ -1,0 +1,59 @@
+{
+	"folders": [
+	  { "path": "server" },
+	  { "path": "frontend" }
+	],
+	"settings": {
+	  "editor.formatOnSave": true,
+	  "terminal.integrated.defaultProfile.osx": "zsh",
+	  "terminal.integrated.scrollback": 10000,
+	  "python.defaultInterpreterPath": "${workspaceFolder:server}/.venv/bin/python",
+	  "tailwindCSS.includeLanguages": { "plaintext": "html" }
+	},
+	"tasks": {
+	  "version": "2.0.0",
+	  "tasks": [
+		{
+		  "label": "backend: env & run (uvicorn)",
+		  "type": "shell",
+		  "command": "cd ${workspaceFolder:server} && test -d .venv || python3 -m venv .venv && source .venv/bin/activate && set -a && [ -f .env ] && source .env || true && set +a && uvicorn app:app --port 8000",
+		  "isBackground": true,
+		  "problemMatcher": [],
+		  "presentation": { "reveal": "always", "panel": "dedicated", "group": "backend" }
+		},
+		{
+		  "label": "backend: kill :8000",
+		  "type": "shell",
+		  "command": "lsof -ti:8000 | xargs kill -9 2>/dev/null || true",
+		  "problemMatcher": []
+		},
+		{
+		  "label": "frontend: dev",
+		  "type": "shell",
+		  "command": "cd ${workspaceFolder:frontend} && npm install && npm run dev",
+		  "isBackground": true,
+		  "problemMatcher": [],
+		  "presentation": { "reveal": "always", "panel": "dedicated", "group": "frontend" }
+		},
+		{
+		  "label": "frontend: kill :3000",
+		  "type": "shell",
+		  "command": "lsof -ti:3000 | xargs kill -9 2>/dev/null || true",
+		  "problemMatcher": []
+		},
+		{
+		  "label": "run both (backend + frontend)",
+		  "dependsOn": [
+			"backend: kill :8000",
+			"frontend: kill :3000",
+			"backend: env & run (uvicorn)",
+			"frontend: dev"
+		  ],
+		  "dependsOrder": "sequence",
+		  "group": { "kind": "build", "isDefault": true },
+		  "problemMatcher": []
+		}
+	  ]
+	}
+  }
+  

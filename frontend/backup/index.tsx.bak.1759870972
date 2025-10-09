@@ -1,0 +1,118 @@
+'use client'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { supabase } from '../lib/supabase'
+
+interface EventItem { id: string; user_id: string; title: string; start_at?: string; end_at?: string; all_day?: boolean }
+
+export default function Home() {
+  const [session, setSession] = useState<any>(null)
+  const [events, setEvents] = useState<EventItem[]>([])
+  const [messages, setMessages] = useState<{role:'user'|'assistant', text:string}[]>([])
+  const [listening, setListening] = useState(false)
+  const wsRef = useRef<WebSocket | null>(null)
+  const recogRef = useRef<any>(null)
+
+  const API_BASE = useMemo(() => process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000', [])
+  const WS_BASE  = useMemo(() => process.env.NEXT_PUBLIC_WS_BASE  || 'ws://localhost:8000', [])
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session))
+    const { data: sub } = supabase.auth.onAuthStateChange((_ev, s) => setSession(s))
+    return () => sub.subscription.unsubscribe()
+  }, [])
+
+  const token = session?.access_token
+
+  useEffect(() => {
+    if (!token) return
+    fetch(`${API_BASE}/api/events`, { headers: { Authorization: `Bearer ${token}` }})
+      .then(r=>r.json()).then(d=>setEvents(d.events||[]))
+
+    const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`)
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      if (data.type === 'initial_events') setEvents(data.events)
+      if (data.type === 'event_created') setEvents(prev => [data.event, ...prev])
+      if (data.type === 'event_deleted') setEvents(prev => prev.filter(e => e.id !== data.event_id))
+      if (data.type === 'assistant_text') setMessages(m=>[...m,{role:'assistant', text:data.text}])
+    }
+    wsRef.current = ws
+    return () => ws.close()
+  }, [token, API_BASE, WS_BASE])
+
+  const signInWithMagic = async () => {
+    const email = prompt('Enter your email for a magic link:')
+    if (!email) return
+    await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: 'http://localhost:3000' } })
+    alert('Check your email for the sign-in link.')
+  }
+  const signOut = () => supabase.auth.signOut()
+
+  const addAssistant = (t:string) => {
+    setMessages(m => [...m, {role:'assistant', text:t}])
+    if ('speechSynthesis' in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(t))
+  }
+
+  const startVoice = async () => {
+    if (!token) { alert('Please sign in first.'); return }
+    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
+    if (!SR) { addAssistant('Use Chrome for SpeechRecognition.'); return }
+    const recog = new SR(); recog.continuous = true; recog.interimResults = true; recog.lang='en-US'
+    recog.onresult = (ev:any) => {
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const res = ev.results[i]; const text = res[0].transcript.trim()
+        if (res.isFinal) {
+          setMessages(m => [...m, {role:'user', text}])
+          fetch(`${API_BASE}/ai/command`, {
+            method:'POST',
+            headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${token}` },
+            body: JSON.stringify({ text })
+          }).then(r=>r.json()).then(out=>{
+            if (out.assistant_text) addAssistant(out.assistant_text)
+          })
+        }
+      }
+    }
+    recog.onerror = () => setListening(false)
+    recog.onend   = () => setListening(false)
+    recog.start(); recogRef.current = recog; setListening(true)
+  }
+  const stopVoice = () => { recogRef.current?.stop(); setListening(false) }
+
+  if (!session) {
+    return (
+      <div style={{padding:40}}>
+        <h1>Voice Calendar</h1>
+        <button onClick={signInWithMagic}>Sign in with email</button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{padding:20}}>
+      <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+        <div>Signed in as {session.user?.email}</div>
+        <button onClick={signOut}>Sign out</button>
+      </div>
+
+      <div style={{margin:'12px 0'}}>
+        {!listening ? <button onClick={startVoice}>🎤 Start</button> : <button onClick={stopVoice}>⏹ Stop</button>}
+      </div>
+
+      <h3>Your events</h3>
+      <ul>
+        {events.sort((a,b)=> (a.start_at||'').localeCompare(b.start_at||'')).map(ev => (
+          <li key={ev.id}>
+            <b>{ev.title}</b> — {ev.start_at ? new Date(ev.start_at).toLocaleString() : 'All day'}
+            <button onClick={() => fetch(`${API_BASE}/api/events/${ev.id}`, {
+              method:'DELETE', headers: { Authorization:`Bearer ${token}` }
+            })}>Delete</button>
+          </li>
+        ))}
+      </ul>
+
+      <h3>Conversation</h3>
+      {messages.map((m,i)=><div key={i}><b>{m.role}:</b> {m.text}</div>)}
+    </div>
+  )
+}

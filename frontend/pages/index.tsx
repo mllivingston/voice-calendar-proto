@@ -1,0 +1,298 @@
+'use client'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { supabase } from '../lib/supabase'
+
+interface EventItem {
+  id: string
+  user_id: string
+  title: string
+  start_at?: string
+  end_at?: string
+  all_day?: boolean
+}
+
+type ChatMsg = { role: 'user' | 'assistant', text: string, ts: number }
+
+export default function VoiceCalendar() {
+  const [session, setSession] = useState<any>(null)
+  const [events, setEvents] = useState<EventItem[]>([])
+  const [messages, setMessages] = useState<ChatMsg[]>([])
+  const [isListening, setIsListening] = useState(false)
+
+  const wsRef = useRef<WebSocket | null>(null)
+  const recogRef = useRef<any>(null)
+
+  const API_BASE = useMemo(() => process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000', [])
+  const WS_BASE  = useMemo(() => process.env.NEXT_PUBLIC_WS_BASE  || 'ws://localhost:8000', [])
+
+  // auth
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session))
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s))
+    return () => sub.subscription.unsubscribe()
+  }, [])
+
+  const token: string | undefined = session?.access_token
+
+  // fetch + ws
+  useEffect(() => {
+    if (!token) return
+
+    fetch(`${API_BASE}/api/events`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(d => setEvents(d.events || []))
+      .catch(() => {})
+
+    const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`)
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      if (data.type === 'initial_events') setEvents(data.events || [])
+      if (data.type === 'event_created') setEvents(prev => [data.event, ...prev])
+      if (data.type === 'event_deleted') setEvents(prev => prev.filter(ev => ev.id !== data.event_id))
+      if (data.type === 'assistant_text') addAssistant(data.text)
+    }
+    wsRef.current = ws
+    return () => ws.close()
+  }, [token, API_BASE, WS_BASE])
+
+  const signInWithMagic = async () => {
+    const email = prompt('Enter your email for a magic link:')
+    if (!email) return
+    await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: 'http://localhost:3000' }
+    })
+    alert('Check your email to complete sign in.')
+  }
+  const signOut = () => supabase.auth.signOut()
+
+  const addUser = (t: string) =>
+    setMessages(m => [...m, { role: 'user', text: t, ts: Date.now() }])
+
+  const addAssistant = (t: string) => {
+    setMessages(m => [...m, { role: 'assistant', text: t, ts: Date.now() }])
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(t))
+    }
+  }
+
+  // voice
+  const startVoice = () => {
+    if (!token) { addAssistant('Please sign in first.'); return }
+    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
+    if (!SR) { addAssistant('Speech recognition not supported in this browser. Try Chrome.'); return }
+
+    const recog = new SR()
+    recog.continuous = true
+    recog.interimResults = true
+    recog.lang = 'en-US'
+
+    recog.onresult = (ev: any) => {
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const res = ev.results[i]
+        const text = res[0].transcript.trim()
+        if (res.isFinal) {
+          addUser(text)
+          fetch(`${API_BASE}/ai/command`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({ text })
+          })
+            .then(r => r.json())
+            .then(out => {
+              if (out.assistant_text) addAssistant(out.assistant_text)
+            })
+            .catch(() => addAssistant('There was a problem talking to the assistant.'))
+        }
+      }
+    }
+    recog.onerror = () => setIsListening(false)
+    recog.onend = () => setIsListening(false)
+    recog.start()
+    recogRef.current = recog
+    setIsListening(true)
+  }
+
+  const stopVoice = () => {
+    recogRef.current?.stop()
+    setIsListening(false)
+  }
+
+  // helpers
+  const groupByDate = (items: EventItem[]) => {
+    const map: Record<string, EventItem[]> = {}
+    for (const ev of items) {
+      const key = ev.start_at ? ev.start_at.slice(0, 10) : 'All-day'
+      if (!map[key]) map[key] = []
+      map[key].push(ev)
+    }
+    return map
+  }
+  const grouped = groupByDate(events)
+  const sortedDates = Object.keys(grouped).sort()
+
+  // signed out
+  if (!session) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8 flex items-center justify-center">
+        <div className="bg-white rounded-2xl shadow-xl p-10 w-full max-w-lg text-center">
+          <h1 className="text-3xl font-bold text-gray-900 mb-3">Voice Calendar Assistant</h1>
+          <p className="text-gray-600 mb-6">Sign in to see your events across devices.</p>
+          <button
+            className="px-5 py-3 rounded-xl bg-indigo-600 text-white font-medium hover:bg-indigo-700 transition"
+            onClick={signInWithMagic}
+          >
+            Sign in with email
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // signed in
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
+      <div className="max-w-7xl mx-auto container-fallback">
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-4xl font-bold text-gray-900">Voice Calendar Assistant</h1>
+            <p className="text-gray-600 mt-1">Signed in as {session.user?.email}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <div className={`w-3 h-3 rounded-full ${isListening ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`} />
+              <span className="text-gray-600">{isListening ? 'Listening…' : 'Idle'}</span>
+            </div>
+            {!isListening ? (
+              <button
+                onClick={startVoice}
+                className="px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition"
+              >
+                🎤 Start Listening
+              </button>
+            ) : (
+              <button
+                onClick={stopVoice}
+                className="px-4 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+              >
+                ⏹ Stop
+              </button>
+            )}
+            <button
+              onClick={signOut}
+              className="px-4 py-2 rounded-xl bg-white text-gray-800 border hover:bg-gray-50 transition"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* calendar */}
+          <div className="bg-white rounded-2xl shadow-xl p-6">
+            <h2 className="text-2xl font-semibold text-gray-800 mb-6">Your Events</h2>
+            {sortedDates.length === 0 ? (
+              <div className="text-center py-12 text-gray-400">
+                <svg className="icon-64 w-16 h-16 mx-auto mb-4" width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <p className="text-lg">No events yet</p>
+                <p className="text-sm mt-2">Try saying “Add lunch tomorrow at 1pm”</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {sortedDates.map(date => (
+                  <div key={date} className="border-l-4 border-indigo-500 pl-4">
+                    <h3 className="text-lg font-semibold text-gray-700 mb-3">
+                      {date === 'All-day'
+                        ? 'All-day'
+                        : new Date(date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                    </h3>
+                    <div className="space-y-2">
+                      {grouped[date]
+                        .sort((a, b) => (a.start_at || '').localeCompare(b.start_at || ''))
+                        .map(ev => (
+                          <div
+                            key={ev.id}
+                            className="bg-gradient-to-r from-indigo-50 to-blue-50 rounded-lg p-4 hover:shadow-md transition-shadow"
+                          >
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <h4 className="font-medium text-gray-900">{ev.title}</h4>
+                                <p className="text-sm text-gray-600 mt-1">
+                                  {ev.all_day
+                                    ? '🕐 All day'
+                                    : ev.start_at
+                                      ? `🕐 ${new Date(ev.start_at).toLocaleString()}`
+                                      : '🕐 All day'}
+                                </p>
+                              </div>
+                              <button
+                                className="text-sm text-red-600 hover:underline"
+                                onClick={() => fetch(`${API_BASE}/api/events/${ev.id}`, {
+                                  method: 'DELETE',
+                                  headers: { Authorization: `Bearer ${token}` }
+                                })}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* conversation */}
+          <div className="bg-white rounded-2xl shadow-xl p-6 flex flex-col h-[600px]">
+            <h2 className="text-2xl font-semibold text-gray-800 mb-4">Conversation</h2>
+            <div className="flex-1 overflow-y-auto space-y-3 mb-4">
+              {messages.length === 0 ? (
+                <div className="text-center py-12 text-gray-400">
+                  <svg className="icon-64 w-16 h-16 mx-auto mb-4" width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </svg>
+                  <p className="text-lg">Start speaking!</p>
+                  <p className="text-sm mt-2">Your conversation will appear here</p>
+                </div>
+              ) : (
+                messages.map((m, i) => (
+                  <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div
+                      className={`max-w-xs px-4 py-3 rounded-2xl ${
+                        m.role === 'user'
+                          ? 'bg-indigo-500 text-white rounded-br-none'
+                          : 'bg-gray-200 text-gray-800 rounded-bl-none'
+                      }`}
+                    >
+                      <p className="text-sm">{m.text}</p>
+                      <p className={`text-xs mt-1 ${m.role === 'user' ? 'text-indigo-200' : 'text-gray-500'}`}>
+                        {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="border-t pt-4">
+              <div className="flex items-center gap-3 text-sm text-gray-600">
+                <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+                <span>Try: "Add meeting tomorrow at 2pm" or "Show my events"</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
