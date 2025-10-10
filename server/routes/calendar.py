@@ -1,0 +1,41 @@
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from jose import jwt, JWTError
+import os
+from ai.schema import Command
+from calendarsvc.tools import apply, MutateError
+
+router = APIRouter(prefix="/calendar", tags=["calendar"])
+
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+def get_current_user(request: Request):
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        from fastapi import HTTPException, status
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    if not SUPABASE_JWT_SECRET:
+        from fastapi import HTTPException, status
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Server auth not configured")
+    token = auth.split(" ", 1)[1].strip()
+    try:
+        payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
+        sub = payload.get("sub") or payload.get("user_id")
+        email = payload.get("email")
+        if not sub:
+            from fastapi import HTTPException, status
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token: no sub")
+        return {"user_id": sub, "email": email}
+    except JWTError:
+        from fastapi import HTTPException, status
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+@router.post("/mutate")
+async def post_mutate(cmd: Command, user=Depends(get_current_user)):
+    if cmd.needs_clarification:
+        return {"status":"needs_clarification", "question": cmd.clarification_question}
+    try:
+        result = apply(cmd)
+        return {"status":"ok", **result}
+    except MutateError as e:
+        return {"status":"error", "error": str(e)}
