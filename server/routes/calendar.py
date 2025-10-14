@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from jose import jwt, JWTError
 import os
-from ai.schema import Command
-from calendarsvc.tools import apply, MutateError
+from server.ai.schema import Command
+from server.calendarsvc.tools import apply, MutateError
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
@@ -49,7 +49,7 @@ async def get_list(user=Depends(get_current_user)):
     events = []
     try:
         # Strategy A: calendarsvc.tools exposes list_events()
-        from calendarsvc.tools import list_events as _list_events
+        from server.calendarsvc.tools import list_events as _list_events
         try:
             events = _list_events() or []
         except TypeError:
@@ -58,7 +58,7 @@ async def get_list(user=Depends(get_current_user)):
     except Exception:
         try:
             # Strategy B: mock provider's USER_DB (if present)
-            from calendarsvc.providers.mock import USER_DB
+            from server.calendarsvc.providers.mock import USER_DB
             try:
                 # Flatten all users; if per-user later, we can scope by user['user_id']
                 for user_events in USER_DB.values():
