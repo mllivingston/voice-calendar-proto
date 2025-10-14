@@ -1,5 +1,8 @@
-fastapi>=0.110
-uvicorn[standard]>=0.23
-sqlmodel>=0.0.16
-pydantic-settings>=2.2
-openai>=1.0.0
+fastapi
+uvicorn[standard]
+pydantic>=2
+httpx
+python-dotenv
+orjson
+tenacity
+openai>=1.40

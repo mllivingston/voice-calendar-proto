@@ -1,39 +1,20 @@
-export const runtime = "nodejs";
-import { cookies } from "next/headers";
+export async function POST(req: Request) {
+  const backend = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:8000";
+  const auth = req.headers.get("authorization") || "";
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (auth) headers["authorization"] = auth;
 
-function getSupabaseAccessTokenFromCookies(): string | null {
-  const cookieStore = cookies();
-  const all = cookieStore.getAll();
-  const authCookie = all.find(c => c.name.startsWith("sb-") && c.name.endsWith("-auth-token"));
-  if (!authCookie?.value) return null;
+  const body = await req.text();
 
-  try {
-    const decoded = decodeURIComponent(authCookie.value);
-    const parsed = JSON.parse(decoded);
-    const token = parsed?.currentSession?.access_token || parsed?.access_token;
-    return typeof token === "string" && token.length > 0 ? token : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function POST(request: Request) {
-  const body = await request.json();
-  const url = `${process.env.NEXT_PUBLIC_SERVER_URL}/calendar/mutate`;
-
-  const token = getSupabaseAccessTokenFromCookies();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(url, {
+  const res = await fetch(`${backend}/calendar/mutate`, {
     method: "POST",
     headers,
-    body: JSON.stringify(body),
+    body,
   });
 
   const text = await res.text();
   return new Response(text, {
     status: res.status,
-    headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
+    headers: { "content-type": res.headers.get("content-type") || "application/json" },
   });
 }

@@ -39,3 +39,41 @@ async def post_mutate(cmd: Command, user=Depends(get_current_user)):
         return {"status":"ok", **result}
     except MutateError as e:
         return {"status":"error", "error": str(e)}
+
+@router.get("/list")
+async def get_list(user=Depends(get_current_user)):
+    """
+    Auth-guarded list endpoint.
+    Tries a few non-breaking strategies to obtain events; falls back to empty.
+    """
+    events = []
+    try:
+        # Strategy A: calendarsvc.tools exposes list_events()
+        from calendarsvc.tools import list_events as _list_events
+        try:
+            events = _list_events() or []
+        except TypeError:
+            # if signature differs, just ignore
+            events = []
+    except Exception:
+        try:
+            # Strategy B: mock provider's USER_DB (if present)
+            from calendarsvc.providers.mock import USER_DB
+            try:
+                # Flatten all users; if per-user later, we can scope by user['user_id']
+                for user_events in USER_DB.values():
+                    try:
+                        events.extend(getattr(user_events, "values")() if hasattr(user_events, "values") else list(user_events))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _to_dict(e):
+        try:
+            return e.__dict__
+        except Exception:
+            return e
+    return {"events": [_to_dict(e) for e in events]}

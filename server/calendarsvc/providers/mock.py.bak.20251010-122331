@@ -1,0 +1,40 @@
+from typing import Dict, Any, List
+from uuid import uuid4
+from dataclasses import dataclass
+
+@dataclass
+class MockEvent:
+    id: str
+    title: str
+    start: str
+    end: str
+    calendar: str = "primary"
+    etag: str = "1"
+
+DB: Dict[str, MockEvent] = {}  # In-memory; V2 per-user persistent
+
+def list_events(_: str, query: str | None = None) -> List[MockEvent]:
+    return list(DB.values())
+
+def create_event(e: Dict[str, Any]) -> MockEvent:
+    eid = str(uuid4())
+    ev = MockEvent(
+        id=eid,
+        title=e.get("title","(untitled)"),
+        start=e["start"],
+        end=e["end"],
+        calendar=e.get("calendar","primary"),
+    )
+    DB[eid] = ev
+    return ev
+
+def update_event(eid: str, patch: Dict[str, Any]) -> MockEvent:
+    ev = DB[eid]
+    for k in ("title","start","end","calendar"):
+        if patch.get(k) is not None:
+            setattr(ev, k, patch[k])
+    ev.etag = str(int(ev.etag) + 1)
+    return ev
+
+def delete_event(eid: str) -> None:
+    DB.pop(eid, None)

@@ -1,0 +1,6 @@
+{
+  "/api/calendar/list/route": "app/api/calendar/list/route.js",
+  "/api/calendar/mutate/route": "app/api/calendar/mutate/route.js",
+  "/ai-test/events/page": "app/ai-test/events/page.js",
+  "/ai-test/page": "app/ai-test/page.js"
+}
