@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from fastapi import HTTPException
 
-from server.providers.memory import provider  # ✅ canonical absolute import
+from server.calendarsvc.providers import mock as provider  # ✅ canonical absolute import
 
 
 def apply(cmd: Dict[str, Any], user: Dict[str, Any] | None = None):
