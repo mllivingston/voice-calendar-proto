@@ -18,3 +18,5 @@ server/.venv/
 # local env / secrets
 server/.env
 frontend/.env.local
+.dev_token
+.env.local
