@@ -7,3 +7,13 @@ frontend/.env.local
 # secrets
 server/.env
 frontend/.env.local
+# build outputs
+frontend/.next/
+frontend/node_modules/
+server/.venv/
+**/__pycache__/
+*.pyc
+
+# local env / secrets
+server/.env
+frontend/.env.local
