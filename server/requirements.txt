@@ -6,3 +6,4 @@ python-dotenv
 orjson
 tenacity
 openai>=1.40
+PyJWT>=2.8,<3

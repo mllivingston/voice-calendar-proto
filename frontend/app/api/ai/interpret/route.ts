@@ -1,46 +1,27 @@
-export const runtime = "nodejs";
-import { cookies } from "next/headers";
+// frontend/app/api/ai/interpret/route.ts
+import { NextRequest, NextResponse } from "next/server";
 
-/**
- * Minimal helper: read Supabase access token from cookie if present.
- * Works even if auth is disabled; returns null when absent.
- */
-function getSupabaseAccessTokenFromCookies(): string | null {
-  const cookieStore = cookies();
-  const all = cookieStore.getAll();
-  // Supabase cookie usually: sb-<project-ref>-auth-token
-  const authCookie = all.find(c => c.name.startsWith("sb-") && c.name.endsWith("-auth-token"));
-  if (!authCookie?.value) return null;
+const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL as string;
 
-  try {
-    const decoded = decodeURIComponent(authCookie.value);
-    const parsed = JSON.parse(decoded); // contains currentSession.access_token
-    const token = parsed?.currentSession?.access_token || parsed?.access_token;
-    return typeof token === "string" && token.length > 0 ? token : null;
-  } catch {
-    return null;
-  }
-}
+export async function POST(req: NextRequest) {
+  const auth = req.headers.get("authorization") ?? "";
+  const body = await req.text();
 
-export async function POST(request: Request) {
-  const body = await request.json();
-  const backend = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:8000";
-  const url = `${backend}/ai/interpret`;
-
-  // Only add Authorization if we actually find a token.
-  const token = getSupabaseAccessTokenFromCookies();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(url, {
+  const upstream = await fetch(`${SERVER_URL}/ai/interpret`, {
     method: "POST",
-    headers,
-    body: JSON.stringify(body),
+    headers: {
+      "Content-Type": "application/json",
+      ...(auth ? { Authorization: auth } : {}),
+    },
+    body,
   });
 
-  const text = await res.text();
-  return new Response(text, {
-    status: res.status,
-    headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
+  const text = await upstream.text();
+  return new NextResponse(text, {
+    status: upstream.status,
+    headers: {
+      "Content-Type":
+        upstream.headers.get("content-type") ?? "application/json",
+    },
   });
 }
