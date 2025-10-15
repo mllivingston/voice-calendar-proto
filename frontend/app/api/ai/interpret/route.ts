@@ -24,7 +24,8 @@ function getSupabaseAccessTokenFromCookies(): string | null {
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const url = `${process.env.NEXT_PUBLIC_SERVER_URL}/ai/interpret`;
+  const backend = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:8000";
+  const url = `${backend}/ai/interpret`;
 
   // Only add Authorization if we actually find a token.
   const token = getSupabaseAccessTokenFromCookies();
