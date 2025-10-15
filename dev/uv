@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if [ ! -x .venv/bin/python3 ]; then
+  python3 -m venv .venv
+fi
+export PATH="$PWD/.venv/bin:$PATH"
+set -a; [ -f server/.env ] && source server/.env; set +a
+exec uvicorn server.main:app --reload --log-level debug

@@ -1,18 +1,23 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || "http://127.0.0.1:8000";
+const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL;
 
 export async function GET(req: NextRequest) {
-  const auth = req.headers.get("authorization") || "";
-  const resp = await fetch(`${SERVER_URL}/calendar/list`, {
-    method: "GET",
-    headers: {
-      ...(auth ? { Authorization: auth } : {}),
-    },
-  });
-  const data = await resp.text();
-  return new Response(data, {
-    status: resp.status,
-    headers: { "Content-Type": resp.headers.get("content-type") || "application/json" },
-  });
+  try {
+    const auth =
+      req.headers.get("authorization") ??
+      req.headers.get("Authorization") ??
+      "";
+    const upstream = await fetch(`${SERVER_URL}/calendar/list`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": auth,
+      },
+    });
+    const data = await upstream.json().catch(() => ({}));
+    return NextResponse.json(data, { status: upstream.status });
+  } catch {
+    return NextResponse.json({ detail: "Upstream unreachable" }, { status: 502 });
+  }
 }
