@@ -1,15 +1,14 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
-from ai.orchestrator import interpret
-from ai.schema import Command
+from __future__ import annotations
+from fastapi import APIRouter, Depends
+from typing import Any, Dict
+
+from server.auth import get_current_user, AuthUser
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-class InterpretIn(BaseModel):
-    text: str
-    tz: str | None = None
-
-@router.post("/interpret", response_model=Command)
-async def post_interpret(body: InterpretIn):
-    tz = body.tz or "America/Los_Angeles"
-    return await interpret(body.text, tz)
+@router.post("/interpret")
+def interpret(body: Dict[str, Any], user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
+    # Stub: echo back a fake command; frontend uses this shape in the prototype.
+    text = (body.get("text") or "").strip()
+    cmd = {"type": "create_event", "title": text or "untitled", "start": None, "end": None}
+    return {"command": cmd, "user": {"sub": user.sub, "email": user.email}}

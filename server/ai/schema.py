@@ -39,3 +39,5 @@ class Command(BaseModel):
     confidence: float = 0.0
     needs_clarification: bool = False
     clarification_question: Optional[str] = None
+# Forward all symbols to the canonical module
+from server.ai.schema import *  # type: ignore

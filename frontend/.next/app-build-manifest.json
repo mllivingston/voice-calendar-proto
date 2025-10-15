@@ -5,15 +5,15 @@
       "static/chunks/main-app.js",
       "static/chunks/app/layout.js"
     ],
-    "/ai-test/events/page": [
+    "/ai-test/login/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/ai-test/events/page.js"
+      "static/chunks/app/ai-test/login/page.js"
     ],
-    "/ai-test/page": [
+    "/_not-found/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/ai-test/page.js"
+      "static/chunks/app/_not-found/page.js"
     ]
   }
 }

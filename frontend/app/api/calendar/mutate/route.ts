@@ -1,20 +1,21 @@
-export async function POST(req: Request) {
-  const backend = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:8000";
+import { NextRequest } from "next/server";
+
+const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || "http://127.0.0.1:8000";
+
+export async function POST(req: NextRequest) {
+  const body = await req.json();
   const auth = req.headers.get("authorization") || "";
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (auth) headers["authorization"] = auth;
-
-  const body = await req.text();
-
-  const res = await fetch(`${backend}/calendar/mutate`, {
+  const resp = await fetch(`${SERVER_URL}/calendar/mutate`, {
     method: "POST",
-    headers,
-    body,
+    headers: {
+      "Content-Type": "application/json",
+      ...(auth ? { Authorization: auth } : {}),
+    },
+    body: JSON.stringify(body),
   });
-
-  const text = await res.text();
-  return new Response(text, {
-    status: res.status,
-    headers: { "content-type": res.headers.get("content-type") || "application/json" },
+  const data = await resp.text();
+  return new Response(data, {
+    status: resp.status,
+    headers: { "Content-Type": resp.headers.get("content-type") || "application/json" },
   });
 }

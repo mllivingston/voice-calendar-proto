@@ -3,3 +3,7 @@ node_modules/
 # Secrets
 server/.env
 frontend/.env.local
+
+# secrets
+server/.env
+frontend/.env.local

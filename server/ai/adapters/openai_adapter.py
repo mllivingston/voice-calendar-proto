@@ -72,3 +72,5 @@ class OpenAILLM:
 
             # Try again
             return Command.model_validate(data)
+# Forward specific adapter to canonical module
+from server.ai.adapters.openai_adapter import *  # type: ignore

@@ -1,67 +1,64 @@
-type Json = any;
+// Helper for calling backend through Next.js proxy with Supabase auth header
 
-async function postJSON(url: string, body: any): Promise<Response> {
-  return fetch(url, {
+import { createClient } from "@supabase/supabase-js";
+
+const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || "http://127.0.0.1:8000";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
+
+const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+async function authHeader(): Promise<Record<string, string>> {
+  try {
+    if (!supabase) return {};
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+// Frontend calls the Next.js API proxies; those proxies forward headers to the FastAPI server.
+
+export async function interpret(text: string) {
+  const headers = await authHeader();
+  const res = await fetch(`/api/ai/interpret`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify(body),
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: JSON.stringify({ text }),
   });
+  if (!res.ok) throw new Error(`interpret failed: ${res.status}`);
+  return res.json();
 }
 
-export async function interpret(utterance: string): Promise<Json> {
-  // Try common payload shapes to satisfy whatever the FastAPI/Pydantic schema is.
-  const candidates = [
-    { input: utterance },
-    { text: utterance },
-    { query: utterance },
-  ];
-
-  // First attempt
-  let res = await postJSON("/api/ai/interpret", candidates[0]);
-  if (res.ok) return res.json();
-
-  // If validation error (422) or bad request (400), try alternates
-  if (res.status === 422 || res.status === 400) {
-    for (let i = 1; i < candidates.length; i++) {
-      const alt = await postJSON("/api/ai/interpret", candidates[i]);
-      if (alt.ok) return alt.json();
-    }
-  }
-
-  // Fall back to throwing detailed text for debugging
-  const text = await res.text().catch(() => "");
-  throw new Error(`interpret ${res.status} ${text}`);
+export async function mutate(command: any) {
+  const headers = await authHeader();
+  const res = await fetch(`/api/calendar/mutate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: JSON.stringify(command),
+  });
+  if (!res.ok) throw new Error(`mutate failed: ${res.status}`);
+  return res.json();
 }
 
-type MutatePayload = any;
-
-// Map LLM-style actions → backend enum: create | update | delete
-function normalizeCommand(cmd: MutatePayload): MutatePayload {
-  if (!cmd || typeof cmd !== "object") return cmd;
-
-  const c = { ...cmd };
-  const a = (c.action || "").toLowerCase();
-
-  const map: Record<string, string> = {
-    create_event: "create",
-    update_event: "update",
-    delete_event: "delete",
-    create: "create",
-    update: "update",
-    delete: "delete",
-  };
-
-  if (map[a]) c.action = map[a];
-  return c;
-}
-
-export async function mutate(cmd: MutatePayload): Promise<Json> {
-  const body = normalizeCommand(cmd);
-  const res = await postJSON("/api/calendar/mutate", body);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`mutate ${res.status} ${text}`);
-  }
-  return res.json().catch(() => ({}));
+export async function listEvents() {
+  const headers = await authHeader();
+  const res = await fetch(`/api/calendar/list`, {
+    method: "GET",
+    headers: {
+      ...headers,
+    },
+  });
+  if (!res.ok) throw new Error(`list failed: ${res.status}`);
+  return res.json();
 }
