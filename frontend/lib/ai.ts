@@ -1,52 +1,42 @@
-// frontend/lib/ai.ts
-"use client";
+type Json = any;
 
-import { createClient } from "@supabase/supabase-js";
+import { authHeader } from "./supabase";
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
-
-function getSupabase() {
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-}
-
-async function getAccessToken(): Promise<string | null> {
-  const supabase = getSupabase();
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? null;
-}
-
-type InterpretPayload = { prompt: string };
-type MutatePayload = { command: unknown };
-
-async function authedFetch(input: RequestInfo, init?: RequestInit) {
-  const token = await getAccessToken();
-  const headers = new Headers(init?.headers || {});
-  headers.set("Content-Type", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(input, { ...init, headers, credentials: "same-origin" });
-}
-
-export async function interpret(payload: InterpretPayload) {
-  const res = await authedFetch("/api/ai/interpret", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`interpret failed: ${res.status} ${res.statusText} ${text}`);
+function browserTZ(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles";
+  } catch {
+    return "America/Los_Angeles";
   }
-  return res.json();
 }
 
-export async function mutate(payload: MutatePayload) {
-  const res = await authedFetch("/api/calendar/mutate", {
+export async function interpret(utterance: string): Promise<Json> {
+  const headers = await authHeader();
+  const res = await fetch(`/api/ai/interpret`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: JSON.stringify({ text: utterance, tz: browserTZ() }),
+    credentials: "include",
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`mutate failed: ${res.status} ${res.statusText} ${text}`);
-  }
+  if (!res.ok) throw new Error(`interpret failed: ${res.status}`);
+  const out = await res.json();
+  return out && typeof out === "object" && "command" in out ? out.command : out;
+}
+
+export async function mutate(command: any): Promise<Json> {
+  const headers = await authHeader();
+  const res = await fetch(`/api/calendar/mutate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: JSON.stringify(command),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`mutate failed: ${res.status}`);
   return res.json();
 }
