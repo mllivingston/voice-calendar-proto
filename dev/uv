@@ -7,3 +7,4 @@ fi
 export PATH="$PWD/.venv/bin:$PATH"
 set -a; [ -f server/.env ] && source server/.env; set +a
 exec uvicorn server.main:app --reload --log-level debug
+
