@@ -8,7 +8,6 @@ export async function GET(req: NextRequest) {
       req.headers.get("authorization") ??
       req.headers.get("Authorization") ??
       "";
-
     const upstream = await fetch(`${SERVER_URL}/calendar/list`, {
       method: "GET",
       headers: {
@@ -16,7 +15,6 @@ export async function GET(req: NextRequest) {
         "Authorization": auth,
       },
     });
-
     const data = await upstream.json().catch(() => ({}));
     return NextResponse.json(data, { status: upstream.status });
   } catch {

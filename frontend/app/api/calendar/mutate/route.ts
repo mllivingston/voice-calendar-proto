@@ -9,7 +9,6 @@ export async function POST(req: NextRequest) {
       req.headers.get("Authorization") ??
       "";
     const body = await req.json();
-
     const upstream = await fetch(`${SERVER_URL}/calendar/mutate`, {
       method: "POST",
       headers: {
@@ -18,7 +17,6 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify(body),
     });
-
     const data = await upstream.json().catch(() => ({}));
     return NextResponse.json(data, { status: upstream.status });
   } catch {
