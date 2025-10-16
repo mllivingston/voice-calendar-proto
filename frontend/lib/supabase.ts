@@ -1,23 +1,23 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-let singleton: SupabaseClient | null = null;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
 
-export function getSupabaseClient(): SupabaseClient {
-  if (singleton) return singleton;
+// Singleton (module scope)
+let _client: SupabaseClient | null = null;
 
-  const url =
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    process.env.SUPABASE_URL ||
-    "";
-  const anonKey =
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    "";
+export function supabase(): SupabaseClient {
+  if (_client) return _client;
+  _client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return _client;
+}
 
-  if (!url || !anonKey) {
-    throw new Error("Supabase env not configured (URL/key missing).");
+export async function authHeader(): Promise<Record<string, string>> {
+  try {
+    const { data } = await supabase().auth.getSession();
+    const token = data?.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
   }
-
-  singleton = createClient(url, anonKey);
-  return singleton;
 }
