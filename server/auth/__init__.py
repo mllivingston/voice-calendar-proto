@@ -1,3 +1,4 @@
+# server/auth/__init__.py
 from __future__ import annotations
 import os
 from typing import Optional, Any, Dict
@@ -23,12 +24,16 @@ class AuthUser(Dict[str, Any]):
 def _bypass_user() -> AuthUser:
     return AuthUser(sub="dev-bypass", email="dev@local")
 
+def _bypass_on() -> bool:
+    v = (os.getenv("AUTH_BYPASS") or "").strip().lower()
+    return v in {"1", "true", "yes"}
+
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer)) -> AuthUser:
     """
-    Dev (AUTH_BYPASS=1): always return a stub user and never raise.
+    Dev (AUTH_BYPASS=true/yes/1): always return a stub user and never raise.
     Prod: require Bearer token and validate HS256 using SUPABASE_JWT_SECRET.
     """
-    if os.getenv("AUTH_BYPASS") == "1":
+    if _bypass_on():
         # ensure code that checks for a secret sees a value
         os.environ.setdefault("SUPABASE_JWT_SECRET", "dev")
         return _bypass_user()
@@ -51,10 +56,10 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
     try:
         # Supabase issues HS256 tokens. No audience verification needed for local dev.
         payload = jwt.decode(token, secret, algorithms=["HS256"], options={"verify_aud": False})
-    except jwt.PyJWTError as e:
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token",
+            detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
