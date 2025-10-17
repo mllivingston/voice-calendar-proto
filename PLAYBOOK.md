@@ -1,35 +1,26 @@
 PLAYBOOK
-Version: 10-16A (Comprehensive + CWD Jumps + Full-Snapshot Git)
-Scope: Development workflow, terminal protocol, env layout, backend & frontend startup, Supabase Auth (HS256), Next.js proxy patterns, crash-proof curl probes, testing and triage, deterministic Git publish workflow.
+Version: 10-17A (Comprehensive + CWD Jumps + Full-Snapshot Git + ASR)
+Scope: Development workflow, terminal protocol, env layout, backend & frontend startup, Supabase Auth (HS256), Next.js proxy patterns, crash-proof curl probes, testing & triage, deterministic Git publish workflow, CWD jump rules, server-side ASR, Safari-safe MediaRecorder.
 0) Core Principles
 Smallest possible changes. Make one change, run, prove, then proceed.
-Create vs Edit.
-Create = new file.
-Edit = replace the entire contents of an existing file (never partial line edits).
+Create = new file. Edit = replace the entire contents of an existing file (never partial line edits).
 Deterministic commands only. Every command block must be pasteable, with no comments or prompts inside.
-Three terminal roles (always labeled):
-FRONTEND TERMINAL — runs Next.js (npm run dev).
-BACKEND TERMINAL — runs FastAPI (python -m uvicorn ...).
-NEW TEMP TERMINAL — one-offs (git, curl, lsof, etc.), then close.
 Environment-safe bootstraps precede any command that depends on Node or Python.
 Reversible. Provide quick rollback for any git or file change.
 1) Terminal Protocol (ALWAYS)
 Before each command block, specify: Terminal, cwd, Env, Assumptions, Rollback (when relevant).
-Command blocks: no inline comments, prompts, or extraneous output.
 Keep long-running servers (frontend/backend) in their dedicated terminals. Use NEW TEMP TERMINAL for diagnostics and git.
-Reminders table
+Reminders
 Role	Typical use	Keep running
 FRONTEND TERMINAL	npm run dev (Next.js)	Yes
 BACKEND TERMINAL	python -m uvicorn ... (FastAPI)	Yes
 NEW TEMP TERMINAL	git, curl, quick checks	No
-1A) Terminal CWD & Jump Rules (new)
+1A) Terminal CWD & Jump Rules
 Rule CWD-1 — Explicit CWD jumps are mandatory. Whenever a command assumes a directory, include a copy-pasteable jump first.
-Canonical jumps
-Jump to app tree
+Canonical jumps (app tree & publish tree)
 cd "$(git rev-parse --show-toplevel)"/..
 cd voice-calendar-proto
 pwd
-Jump to publish tree
 cd "$(git rev-parse --show-toplevel)"/..
 cd voice-calendar-proto-publish
 pwd
@@ -37,6 +28,11 @@ Quick verify
 git rev-parse --show-toplevel
 git branch --show-current
 pwd
+Universal “from anywhere” jumps (10-17 addition)
+These work in any new terminal; fall back to ~/voice-calendar-proto if not inside a repo.
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/voice-calendar-proto")"
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/voice-calendar-proto")/frontend"
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/voice-calendar-proto")/server"
 2) Repository Layout (paths of record)
 Frontend app: frontend/
 Backend app: server/
@@ -51,17 +47,15 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=<your_supabase_anon_key>
 NEXT_PUBLIC_SERVER_URL=http://127.0.0.1:8000
 If .env.local exists at repo root, move it:
 git mv .env.local frontend/.env.local
+10-17 addition (ASR):
+OPENAI_API_KEY=<your_openai_key>
 3.2 Backend — server/.env (HS256)
 Required keys (local dev):
 SUPABASE_JWT_SECRET=<your_supabase_project_jwt_secret>
 SUPABASE_URL=<optional_project_url_if_used>
 AUTH_BYPASS=false
 4) Backend Startup (deterministic, root .venv)
-Terminal: BACKEND TERMINAL
-cwd: <repo-root>
-Env: activates <repo-root>/.venv
-Assumptions: server/requirements.txt, server/.env exist
-Rollback: deactivate && rm -rf .venv
+BACKEND TERMINAL
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -72,11 +66,7 @@ PyJWT sanity probe (NEW TEMP TERMINAL)
 source .venv/bin/activate
 python -c "import sys,jwt; print(sys.executable); print('PyJWT', jwt.version)"
 5) Frontend Startup (Next.js)
-Terminal: FRONTEND TERMINAL
-cwd: <repo-root>/frontend
-Env: none
-Assumptions: frontend/.env.local exists with required keys
-Rollback: STOP FRONTEND then rerun
+FRONTEND TERMINAL
 npm install
 npm run dev
 6) Supabase Auth (HS256) — E2E Flow
@@ -84,7 +74,7 @@ Client obtains Supabase access token.
 Client attaches Authorization: Bearer <token> on calls to the app’s Next.js API routes.
 Next.js API routes forward Authorization to FastAPI.
 FastAPI validates HS256 token using SUPABASE_JWT_SECRET and returns 401 if missing/invalid.
-(Keep your working helper; this is the pattern of record.)
+Expectation: When signed-out (or using curl without Authorization), 401s from interpret/mutate are normal.
 7) Next.js Proxy Pattern (never throw, forward auth)
 File: frontend/app/api/calendar/mutate/route.ts (POST example)
 import { NextRequest, NextResponse } from "next/server";
@@ -163,27 +153,24 @@ git commit -m "Apply 10-16A playbook-compliant auth/proxy updates"
 git log -1 --stat
 Rollback last commit
 git reset --soft HEAD~1
-12) Git Publishing Workflow — Full-Snapshot, No Downtime (new)
+12) Git Publishing Workflow — Full-Snapshot, No Downtime
 Goal: Keep app servers running in the app tree while publishing from a separate publish tree. No branch flips in running terminals.
 12.1 One-time: ensure publish worktree exists
-Terminal: NEW TEMP TERMINAL
-cwd: app tree jump
+NEW TEMP TERMINAL
 cd "$(git rev-parse --show-toplevel)"/..
 cd voice-calendar-proto
 pwd
 git fetch --all --prune
 git worktree add ../voice-calendar-proto-publish main
 12.2 Publish a full snapshot from the app tree
-Terminal: NEW TEMP TERMINAL
-cwd: app tree jump
+NEW TEMP TERMINAL
 cd "$(git rev-parse --show-toplevel)"/..
 cd voice-calendar-proto
 pwd
 AUTO_WIP=1 scripts/publish_full_snapshot.sh
 Expected: prints Published branch: publish/<timestamp> (...)
 12.3 Merge newest publish/* into main from the publish tree
-Terminal: NEW TEMP TERMINAL
-cwd: publish tree jump
+NEW TEMP TERMINAL
 cd "$(git rev-parse --show-toplevel)"/..
 cd voice-calendar-proto-publish
 pwd
@@ -196,6 +183,14 @@ git push origin HEAD:main
 12.4 Verify (still in publish tree)
 git fetch --all --prune
 git log --oneline -1 origin/main
+10-17 additions (publish hygiene)
+The snapshot includes only committed changes. If the pre-check shows “Staged files:” empty, nothing new will land.
+Ensure .env.local is untracked:
+echo -e "\n.env.local\nfrontend/.env.local" >> .gitignore
+git rm --cached .env.local 2>/dev/null || true
+git rm --cached frontend/.env.local 2>/dev/null || true
+git add .gitignore
+git commit -m "gitignore: ensure .env.local not tracked" || true
 13) Roadmap Snapshot (post-Auth)
 UI restore: bring back visual calendar UI; render server diffs (create/update/delete/move) onto the calendar.
 GET /calendar/list + tiny in-page list.
@@ -210,3 +205,36 @@ Load backend env in BACKEND TERMINAL: set -a; source server/.env; set +a.
 Next.js proxies must never throw; they must forward Authorization.
 Curl probes must be jq-free and method-correct.
 CWD-1 enforced: every location-dependent command must be preceded by a jump block.
+10-17 Additions (ASR + Helpers + Safari Notes)
+A) ASR Endpoint (Next.js)
+File: frontend/app/api/ai/asr/route.ts
+Requires: OPENAI_API_KEY in frontend/.env.local and npm i openai
+Accepts: raw Blob (with content-type) or multipart/form-data (file)
+Returns: { "text": string }
+B) Safari-Safe MediaRecorder (zero-byte fix)
+Choose a supported MIME (Safari often prefers audio/mp4 / audio/m4a).
+Wait for the stop event before constructing the Blob.
+Prefer multipart/form-data for uploads.
+Reference snippet maintained in the repo notes.
+C) Frontend Helpers (library)
+File: frontend/lib/ai.ts (exports)
+transcribeAudio(blob: Blob): Promise<string> → POST /api/ai/asr (multipart)
+interpret(text: string, token?: string) → POST /api/ai/interpret
+mutate(command: any, token?: string) → POST /api/calendar/mutate
+Auth expectation: 401 from interpret/mutate when no Bearer—normal.
+D) /ai-test/events Mic Flow (wired)
+recording → asr → interpret → mutate → done | error
+Shows transcript, last command JSON, and a temporary in-page list updated from returned diff.
+When logged out, ASR succeeds; interpret/mutate may 401 (expected).
+E) Imports & Paths Guidance
+Prefer relative imports in app pages (e.g., ../../../lib/ai) to avoid alias drift.
+If using @/* aliases, ensure frontend/tsconfig.json sets:
+{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["./*"] } } }
+F) ASR Triage (500s) — Order of Checks
+OPENAI_API_KEY present in frontend/.env.local
+Restart npm run dev after env changes
+npm i openai done in frontend
+Use multipart/form-data instead of raw Blob
+Verify with a known file:
+curl -sS -X POST http://localhost:3000/api/ai/asr -H "content-type: audio/m4a" --data-binary @~/Desktop/test.m4a
+End of PLAYBOOK 10-17A
