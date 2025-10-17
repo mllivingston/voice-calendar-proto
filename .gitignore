@@ -20,3 +20,7 @@ server/.env
 frontend/.env.local
 .dev_token
 .env.local
+
+# env
+.env.local
+frontend/.env.local
