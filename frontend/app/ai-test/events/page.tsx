@@ -1,267 +1,241 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { interpret, mutate } from "../../../lib/ai";
-import { authHeader } from "../../../lib/supabase";
+import React, { useEffect, useRef, useState } from "react";
+import { transcribeAudio, interpret, mutate } from "../../../lib/ai";
 
-type EventItem = {
-  id: string;
-  title?: string | null;
-  start?: string | null;
-  end?: string | null;
-  created_at?: string | null;
-};
+type Diff =
+  | { type: "create"; event: any }
+  | { type: "update"; event: any }
+  | { type: "delete"; id: string }
+  | { type: "noop" };
 
-type ListPayload = { events?: EventItem[] } | { data?: EventItem[] } | EventItem[] | any;
-
-function normalizeToArray(payload: ListPayload): EventItem[] {
-  if (Array.isArray(payload)) return payload;
-  if (payload && Array.isArray((payload as any).events)) return (payload as any).events;
-  if (payload && Array.isArray((payload as any).data)) return (payload as any).data;
-  return [];
+function tryGetSupabaseAccessToken(): string | undefined {
+  try {
+    // Look for sb-*-auth-token in localStorage (Supabase client default)
+    const entry = Object.entries(localStorage).find(([k]) => k.endsWith("-auth-token"));
+    const raw = entry?.[1] as string | undefined;
+    if (!raw) return undefined;
+    const obj = JSON.parse(raw);
+    return (
+      obj?.access_token ||
+      obj?.currentSession?.access_token ||
+      obj?.data?.session?.access_token ||
+      undefined
+    );
+  } catch {
+    return undefined;
+  }
 }
-function isoToDate(s?: string | null) { if (!s) return null; const d = new Date(s); return isNaN(d.getTime()) ? null : d; }
-function startOfWeek(d: Date) { const x = new Date(d); const day = x.getDay(); x.setHours(0,0,0,0); x.setDate(x.getDate()-day); return x; }
-function endOfWeek(d: Date) { const s = startOfWeek(d); const e = new Date(s); e.setDate(s.getDate()+7); return e; }
-function sameDay(a: Date, b: Date) { return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
-function fmtTime(d: Date | null) { if (!d) return ""; return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
-function within(d: Date, start: Date, end: Date) { return d.getTime()>=start.getTime() && d.getTime()<end.getTime(); }
-function addDays(d: Date, n: number) { const x = new Date(d); x.setDate(x.getDate()+n); return x; }
-function localInputToISO(v: string): string | null { if (!v) return null; const dt = new Date(v); if (isNaN(dt.getTime())) return null; return dt.toISOString(); }
 
-export default function EventsVisualPage() {
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [loading, setLoading] = useState(false);
+export default function EventsPage() {
+  // UI state
+  const [recording, setRecording] = useState(false);
+  const [status, setStatus] = useState<
+    "idle" | "recording" | "asr" | "interpret" | "mutate" | "done" | "error"
+  >("idle");
   const [error, setError] = useState<string | null>(null);
-  const [raw, setRaw] = useState<any>(null);
+  const [info, setInfo] = useState<string>("");
 
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
-  const [weekAnchor, setWeekAnchor] = useState<Date>(() => startOfWeek(new Date()));
-  const weekStart = useMemo(() => startOfWeek(weekAnchor), [weekAnchor]);
-  const weekEnd = useMemo(() => endOfWeek(weekAnchor), [weekAnchor]);
-  const days = useMemo(() => [...Array(7)].map((_, i) => addDays(weekStart, i)), [weekStart]);
-
-  const [title, setTitle] = useState<string>("");
-  const [startLocal, setStartLocal] = useState<string>("");
-  const [endLocal, setEndLocal] = useState<string>("");
-
-  const [micSupported, setMicSupported] = useState<boolean>(false);
-  const [listening, setListening] = useState<boolean>(false);
-  const [transcript, setTranscript] = useState<string>("");
+  // Data from flow
+  const [transcript, setTranscript] = useState("");
   const [lastCommand, setLastCommand] = useState<any>(null);
-  const recognitionRef = useRef<any>(null);
+  const [events, setEvents] = useState<any[]>([]);
 
+  // MediaRecorder plumbing
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+  const stopResolveRef = useRef<(() => void) | null>(null);
+
+  // Token (if logged in). If not present, interpret/mutate will 401 unless backend bypass is enabled.
+  const [accessToken, setAccessToken] = useState<string | undefined>(undefined);
   useEffect(() => {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SR) {
-      setMicSupported(true);
-      const rec = new SR();
-      rec.lang = navigator.language || "en-US";
-      rec.interimResults = true;
-      rec.continuous = false;
-      rec.onresult = (e: any) => {
-        let t = "";
-        for (let i = e.resultIndex; i < e.results.length; i++) t += e.results[i][0].transcript;
-        setTranscript(t.trim());
-      };
-      rec.onerror = () => setListening(false);
-      rec.onend = () => setListening(false);
-      recognitionRef.current = rec;
-    } else setMicSupported(false);
+    setAccessToken(tryGetSupabaseAccessToken());
   }, []);
 
-  async function refreshEvents() {
-    setError(null);
-    try {
-      const headers = await authHeader();
-      const res = await fetch("/api/calendar/list", { method: "GET", headers, credentials: "include", cache: "no-store" });
-      const json = await res.json().catch(() => ({}));
-      setRaw(json);
-      if (!res.ok) { setEvents([]); setError(`list failed ${res.status}`); return; }
-      setEvents(normalizeToArray(json));
-    } catch { setError("list error"); setEvents([]); setRaw(null); }
-  }
-
-  // UPDATED: unwrap command before mutate
-  async function runVoiceCommand(utterance: string) {
-    if (!utterance) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const interpreted = await interpret(utterance);
-      const body = interpreted && typeof interpreted === "object" && "command" in (interpreted as any)
-        ? (interpreted as any).command
-        : interpreted;
-      setLastCommand(body);
-      await mutate(body);
-      await refreshEvents();
-    } catch { setError("voice command failed"); }
-    finally { setLoading(false); }
-  }
-
-  function toggleMic() {
-    const rec = recognitionRef.current;
-    if (!rec) return;
-    if (!listening) { setTranscript(""); setListening(true); try { rec.start(); } catch { setListening(false); } }
-    else { try { rec.stop(); } catch {} setListening(false); }
-  }
-
-  async function handleCreate(e?: React.FormEvent) {
-    e?.preventDefault();
-    setLoading(true);
-    setError(null);
-    try {
-      const startISO = localInputToISO(startLocal);
-      const endISO = localInputToISO(endLocal);
-      if (!startISO || !endISO) { setError("Please provide valid start and end times."); setLoading(false); return; }
-      await mutate({ type: "create_event", title: title || "(untitled)", start: startISO, end: endISO });
-      setTitle(""); setStartLocal(""); setEndLocal("");
-      await refreshEvents();
-    } catch { setError("create failed"); }
-    finally { setLoading(false); }
-  }
-
-  async function handleDeleteLast() {
-    setLoading(true);
-    setError(null);
-    try { await mutate({ op: "delete_last" }); await refreshEvents(); }
-    catch { setError("delete failed"); }
-    finally { setLoading(false); }
-  }
-
-  useEffect(() => { refreshEvents(); }, []);
-
-  const eventsByDay = useMemo(() => {
-    const map: Record<number, EventItem[]> = {}; days.forEach((_, i) => (map[i] = []));
-    for (const e of events) {
-      const s = isoToDate(e.start) ?? isoToDate(e.created_at);
-      const en = isoToDate(e.end) ?? s; if (!s) continue;
-      const clipStart = new Date(Math.max(s.getTime(), weekStart.getTime()));
-      const clipEnd = new Date(Math.min((en ?? s).getTime(), weekEnd.getTime()));
-      for (let i = 0; i < days.length; i++) {
-        const dayStart = new Date(days[i]); dayStart.setHours(0,0,0,0);
-        const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate()+1);
-        if (within(clipStart, dayStart, dayEnd) || within(new Date(clipEnd.getTime()-1), dayStart, dayEnd)) {
-          (map[i] ??= []).push(e);
-        }
-      }
+  // Very small in-page "list" until Action 10 adds real GET /calendar/list
+  const applyDiff = (diff: Diff) => {
+    if (!diff) return;
+    if (diff.type === "create" && (diff as any).event) {
+      setEvents((prev) => [((diff as any).event), ...prev]);
+    } else if (diff.type === "update" && (diff as any).event) {
+      setEvents((prev) =>
+        prev.map((e) => (e.id === (diff as any).event.id ? (diff as any).event : e))
+      );
+    } else if (diff.type === "delete" && (diff as any).id) {
+      setEvents((prev) => prev.filter((e) => e.id !== (diff as any).id));
     }
-    Object.values(map).forEach(arr => arr.sort((a,b) => {
-      const as = isoToDate(a.start) ?? isoToDate(a.created_at) ?? new Date(0);
-      const bs = isoToDate(b.start) ?? isoToDate(b.created_at) ?? new Date(0);
-      return as.getTime() - bs.getTime();
-    }));
-    return map;
-  }, [events, days, weekStart, weekEnd]);
+  };
 
-  const weekLabel = `${weekStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${addDays(weekEnd,-1).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+  async function startRecording() {
+    setRecording(true);
+    setStatus("recording");
+    setError(null);
+    setInfo("");
+    setTranscript("");
+    setLastCommand(null);
+
+    // Pick a MIME the browser supports (Safari likes mp4/m4a)
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/mpeg",
+    ];
+    const mimeType =
+      (MediaRecorder as any).isTypeSupported?.(candidates[0]) ? candidates[0] :
+      (MediaRecorder as any).isTypeSupported?.(candidates[1]) ? candidates[1] :
+      (MediaRecorder as any).isTypeSupported?.(candidates[2]) ? candidates[2] :
+      (MediaRecorder as any).isTypeSupported?.(candidates[3]) ? candidates[3] :
+      "";
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    mediaRecorderRef.current = mr;
+    chunksRef.current = [];
+
+    mr.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    mr.onstop = () => {
+      stopResolveRef.current?.();
+    };
+
+    mr.start();
+  }
+
+  async function stopRecording() {
+    if (!mediaRecorderRef.current) return;
+    setRecording(false);
+
+    const mr = mediaRecorderRef.current;
+    const stopped = new Promise<void>((res) => {
+      stopResolveRef.current = res;
+    });
+    mr.stop();
+    await stopped;
+
+    // stop mic tracks
+    try {
+      mr.stream.getTracks().forEach((t) => t.stop());
+    } catch {}
+
+    mediaRecorderRef.current = null;
+
+    const firstType = (chunksRef.current[0] as any)?.type || "audio/webm";
+    const blob = new Blob(chunksRef.current, { type: firstType });
+
+    if (!blob.size) {
+      setStatus("error");
+      setError("Captured empty audio. Check mic permissions and try again.");
+      return;
+    }
+
+    try {
+      // 1) ASR
+      setStatus("asr");
+      const text = await transcribeAudio(blob);
+      setTranscript(text || "");
+      setInfo(`Blob ${blob.type} • ${blob.size} bytes`);
+
+      // If you just want voice→text, we're done here.
+      if (!text) {
+        setStatus("done");
+        return;
+      }
+
+      // 2) Interpret (requires token unless backend bypass is on)
+      setStatus("interpret");
+      const cmd = await interpret(text, accessToken); // might 401 if not logged in
+      setLastCommand(cmd);
+
+      // 3) Mutate (requires token unless backend bypass is on)
+      setStatus("mutate");
+      const result = await mutate(cmd, accessToken);
+      if (result?.diff) applyDiff(result.diff as Diff);
+
+      setStatus("done");
+    } catch (e: any) {
+      setStatus("error");
+      setError(e?.message || "Voice flow failed");
+    }
+  }
 
   return (
-    <div className="p-4 space-y-6">
+    <div className="p-6 space-y-6">
       <header className="flex items-center justify-between">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-2xl font-extrabold">Calendar</h1>
-          <span className="text-xs opacity-70 border rounded px-2 py-[2px]">{tz}</span>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => setWeekAnchor(addDays(weekAnchor,-7))} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99]" aria-label="Previous week">←</button>
-          <button onClick={() => setWeekAnchor(startOfWeek(new Date()))} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99]" aria-label="Jump to current week">Today</button>
-          <button onClick={() => setWeekAnchor(addDays(weekAnchor,+7))} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99]" aria-label="Next week">→</button>
-          <button onClick={refreshEvents} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99]">Refresh</button>
-          <button onClick={handleDeleteLast} disabled={loading} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99] disabled:opacity-50">{loading ? "Deleting…" : "Delete Last"}</button>
+        <h1 className="text-2xl font-semibold">AI Test — Events</h1>
+        <div className="flex items-center gap-3">
+          {!recording ? (
+            <button
+              onClick={startRecording}
+              className="rounded-2xl px-4 py-2 shadow border"
+              aria-label="Start voice"
+            >
+              🎙️ Start
+            </button>
+          ) : (
+            <button
+              onClick={stopRecording}
+              className="rounded-2xl px-4 py-2 shadow border"
+              aria-label="Stop voice"
+            >
+              ⏹️ Stop
+            </button>
+          )}
         </div>
       </header>
 
-      <div className="grid gap-2 sm:grid-cols-[auto_1fr_auto] items-center border rounded-xl p-3">
-        <div className="text-sm font-semibold">🎙️ Voice</div>
-        <div className="text-xs opacity-80 break-words">
-          {transcript ? `“${transcript}”` : micSupported ? "Press Speak and start talking…" : "Mic not supported in this browser"}
-        </div>
-        <div className="flex gap-2">
-          <button onClick={toggleMic} className={`rounded px-3 py-1 border shadow-sm active:scale-[0.99] ${listening ? "bg-gray-100" : ""}`} disabled={!micSupported}>
-            {listening ? "Stop" : "Speak"}
-          </button>
-          <button onClick={() => runVoiceCommand(transcript)} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99]" disabled={!transcript || loading}>
-            Run
-          </button>
-        </div>
-        {lastCommand && (
-          <div className="sm:col-span-3 text-[11px] opacity-70">
-            Last command: <code className="bg-gray-50 px-1 py-[1px] rounded">{JSON.stringify(lastCommand)}</code>
-          </div>
-        )}
-      </div>
-
-      <form onSubmit={handleCreate} className="grid gap-2 sm:grid-cols-3 items-end border rounded-xl p-3">
-        <div className="sm:col-span-3 text-sm font-semibold">+ New</div>
-        <label className="grid gap-1 text-sm">
-          <span className="opacity-70">Title</span>
-          <input className="border rounded px-2 py-1 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Team sync" />
-        </label>
-        <label className="grid gap-1 text-sm">
-          <span className="opacity-70">Start</span>
-          <input type="datetime-local" className="border rounded px-2 py-1 text-sm" value={startLocal} onChange={(e) => setStartLocal(e.target.value)} />
-        </label>
-        <label className="grid gap-1 text-sm">
-          <span className="opacity-70">End</span>
-          <input type="datetime-local" className="border rounded px-2 py-1 text-sm" value={endLocal} onChange={(e) => setEndLocal(e.target.value)} />
-        </label>
-        <div className="sm:col-span-3">
-          <button type="submit" disabled={loading} className="rounded px-3 py-1 border shadow-sm active:scale-[0.99] disabled:opacity-50">
-            {loading ? "Creating…" : "Create Event"}
-          </button>
-        </div>
-        {error && <div className="sm:col-span-3 text-red-700 bg-red-100 border border-red-300 rounded p-2 text-sm">{error}</div>}
-      </form>
-
-      <div className="text-sm opacity-80">
-        {`${weekStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${addDays(weekEnd,-1).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}
-      </div>
-
-      <div className="grid grid-cols-7 gap-2 text-sm">
-        {days.map((d, i) => (
-          <div key={i} className={`px-2 py-1 rounded border ${sameDay(d, new Date()) ? "bg-gray-100 font-semibold" : "bg-white"}`} title={d.toDateString()}>
-            {d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
-          </div>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-7 gap-2">
-        {days.map((d, i) => (
-          <div key={i} className="min-h-[220px] rounded-xl border p-2 bg-white">
-            <ul className="space-y-1">
-              {(eventsByDay[i] ?? []).map((e) => {
-                const s = isoToDate(e.start) ?? isoToDate(e.created_at);
-                const en = isoToDate(e.end);
-                return (
-                  <li key={e.id} className="text-xs border rounded px-2 py-1">
-                    <div className="font-medium truncate">{e.title || "(no title)"}</div>
-                    <div className="opacity-70">
-                      {fmtTime(s)} {en ? <>→ {fmtTime(en)}</> : null}
-                    </div>
-                  </li>
-                );
-              })}
-              {(eventsByDay[i] ?? []).length === 0 && <li className="text-xs opacity-50 italic">(no events)</li>}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* Left: mock list until Action 10 */}
+        <div className="md:col-span-2 space-y-4">
+          <div className="rounded-2xl border p-4">
+            <div className="text-sm opacity-70 mb-2">Recent (mock list; Action 10 will fetch real)</div>
+            <ul className="space-y-2">
+              {events.map((e) => (
+                <li key={e.id} className="rounded-xl border p-3">
+                  <div className="font-medium">{e.title || "(untitled)"}</div>
+                  <div className="text-sm opacity-70">
+                    {e.start} → {e.end || "—"}
+                  </div>
+                </li>
+              ))}
+              {events.length === 0 && <li className="text-sm opacity-70">No items yet</li>}
             </ul>
           </div>
-        ))}
-      </div>
+        </div>
 
-      <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Event List</h2>
-        <ul className="space-y-1">
-          {(events ?? []).map((e) => (
-            <li key={e.id} className="text-sm border-b border-gray-200 pb-1">
-              {e.title || "(no title)"} — {e.start} {e.end ? <>→ {e.end}</> : null}
-            </li>
-          ))}
-          {(events ?? []).length === 0 && !error && <li className="text-sm text-gray-500">(no events)</li>}
-        </ul>
-        <details>
-          <summary className="cursor-pointer text-sm text-gray-600">Raw list response</summary>
-          <pre className="text-xs overflow-auto border rounded bg-gray-50 p-2">{JSON.stringify(raw, null, 2)}</pre>
-        </details>
+        {/* Right: status/transcript/command */}
+        <div className="space-y-4">
+          <div className="rounded-2xl border p-4">
+            <div className="text-sm opacity-70">Status</div>
+            <div className="text-lg">{status}</div>
+            {info && <div className="text-sm opacity-70 mt-1">{info}</div>}
+            {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
+            {!accessToken && (
+              <div className="text-xs opacity-70 mt-2">
+                Note: Not logged in. Interpret/Mutate may 401 unless backend bypass is enabled.
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border p-4">
+            <div className="text-sm opacity-70 mb-2">Transcript</div>
+            <textarea
+              className="w-full rounded-xl border p-2 min-h-[120px]"
+              value={transcript}
+              readOnly
+            />
+          </div>
+
+          <div className="rounded-2xl border p-4">
+            <div className="text-sm opacity-70 mb-2">Last Command (from interpret)</div>
+            <textarea
+              className="w-full rounded-xl border p-2 min-h-[120px]"
+              value={lastCommand ? JSON.stringify(lastCommand, null, 2) : ""}
+              readOnly
+            />
+          </div>
+        </div>
       </section>
     </div>
   );
