@@ -1,42 +1,46 @@
-type Json = any;
-
-import { authHeader } from "./supabase";
-
-function browserTZ(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles";
-  } catch {
-    return "America/Los_Angeles";
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const form = new FormData();
+  form.append("file", blob, "audio.webm");
+  const res = await fetch("/api/ai/asr", { method: "POST", body: form });
+  if (!res.ok) {
+    let msg = `ASR HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
   }
+  const data = await res.json();
+  return data.text as string;
 }
 
-export async function interpret(utterance: string): Promise<Json> {
-  const headers = await authHeader();
-  const res = await fetch(`/api/ai/interpret`, {
+export async function interpret(text: string, accessToken?: string) {
+  const res = await fetch("/api/ai/interpret", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      ...headers,
+      "content-type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
-    body: JSON.stringify({ text: utterance, tz: browserTZ() }),
-    credentials: "include",
+    body: JSON.stringify({ input: text }),
   });
-  if (!res.ok) throw new Error(`interpret failed: ${res.status}`);
-  const out = await res.json();
-  return out && typeof out === "object" && "command" in out ? out.command : out;
+  if (!res.ok) {
+    let msg = `Interpret HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
 }
 
-export async function mutate(command: any): Promise<Json> {
-  const headers = await authHeader();
-  const res = await fetch(`/api/calendar/mutate`, {
+export async function mutate(command: any, accessToken?: string) {
+  const res = await fetch("/api/calendar/mutate", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      ...headers,
+      "content-type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify(command),
-    credentials: "include",
   });
-  if (!res.ok) throw new Error(`mutate failed: ${res.status}`);
+  if (!res.ok) {
+    let msg = `Mutate HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
   return res.json();
 }
