@@ -1,325 +1,349 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import { transcribeAudio, interpret, mutate, deleteLastEvent } from "../../../lib/ai";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 
-type Diff =
-  | { type: "create"; event: any }
-  | { type: "update"; event: any }
-  | { type: "delete"; id: string }
-  | { type: "noop" };
+// Lazy-load Mic UI (client-only)
+const MicCapture = dynamic(() => import("../MicCapture"), { ssr: false });
 
-function tryGetSupabaseAccessToken(): string | undefined {
+type EventItem = {
+  id: string;
+  title?: string | null;
+  start?: string | null;
+  end?: string | null;
+  created_at?: string | null;
+  [k: string]: any;
+};
+
+type ListResponse = EventItem[] | { events?: EventItem[] } | Record<string, any>;
+
+function normalizeToArray(data: ListResponse): EventItem[] {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray((data as any).events)) return (data as any).events;
+  return [];
+}
+
+function formatLocal(dt?: string | null) {
+  if (!dt) return "";
   try {
-    const entry = Object.entries(localStorage).find(([k]) => k.endsWith("-auth-token"));
-    const raw = entry?.[1] as string | undefined;
-    if (!raw) return undefined;
-    const obj = JSON.parse(raw);
-    return (
-      obj?.access_token ||
-      obj?.currentSession?.access_token ||
-      obj?.data?.session?.access_token ||
-      undefined
-    );
+    const d = new Date(dt);
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
   } catch {
-    return undefined;
+    return dt || "";
   }
 }
 
-// Normalize interpret outputs of various shapes into the backend's expected command
-function normalizeCommand(cmd: any) {
-  if (!cmd || typeof cmd !== "object") return cmd;
-  if (cmd.command && typeof cmd.command === "object") return cmd.command; // unwrap { command: {...} }
-  if (cmd.cmd && typeof cmd.cmd === "object") return cmd.cmd; // unwrap { cmd: {...} }
-  return cmd;
-}
+function useToast() {
+  const [msg, setMsg] = useState<string>("");
+  const [visible, setVisible] = useState(false);
+  const timeoutRef = useRef<number | null>(null);
 
-async function fetchEvents(accessToken?: string) {
-  const res = await fetch("/api/calendar/list", {
-    headers: { ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    let msg = `List HTTP ${res.status}`;
-    try {
-      const j = await res.json();
-      if (j?.error) msg = j.error;
-      if (j?.detail) msg = j.detail;
-    } catch {}
-    throw new Error(msg);
-  }
-  const data = await res.json();
-  return (data?.events as any[]) || [];
+  const show = useCallback((text: string, ms = 1800) => {
+    setMsg(text);
+    setVisible(true);
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+    timeoutRef.current = window.setTimeout(() => setVisible(false), ms);
+  }, []);
+
+  useEffect(() => () => timeoutRef.current && window.clearTimeout(timeoutRef.current), []);
+
+  const node = (
+    <div
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        left: 0,
+        right: 0,
+        bottom: 16,
+        display: "flex",
+        justifyContent: "center",
+        pointerEvents: "none",
+        transition: "opacity 200ms ease",
+        opacity: visible ? 1 : 0,
+        zIndex: 2147483647,
+      }}
+      className="fixed inset-x-0 bottom-4 flex justify-center pointer-events-none transition-opacity duration-200"
+    >
+      <div
+        style={{
+          pointerEvents: "auto",
+          background: "rgba(255,255,255,0.95)",
+          border: "1px solid rgba(0,0,0,0.1)",
+          borderRadius: 16,
+          padding: "8px 12px",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+        }}
+        className="pointer-events-auto rounded-2xl border bg-white/90 backdrop-blur px-4 py-2 shadow"
+      >
+        <span style={{ fontSize: 14 }}>{msg}</span>
+      </div>
+    </div>
+  );
+
+  return { show, node };
 }
 
 export default function EventsPage() {
-  const [recording, setRecording] = useState(false);
-  const [status, setStatus] = useState<
-    "idle" | "recording" | "asr" | "interpret" | "mutate" | "refresh" | "done" | "error"
-  >("idle");
+  const [events, setEvents] = useState<EventItem[]>([]);
+  const [raw, setRaw] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string>("");
 
-  const [transcript, setTranscript] = useState("");
-  const [lastCommand, setLastCommand] = useState<any>(null);
+  const [title, setTitle] = useState("");
+  const [startLocal, setStartLocal] = useState("");
+  const [endLocal, setEndLocal] = useState("");
 
-  const [events, setEvents] = useState<any[]>([]);
-  const [eventsLoading, setEventsLoading] = useState<boolean>(true);
-  const [eventsError, setEventsError] = useState<string | null>(null);
+  const { show, node: toast } = useToast();
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  const stopResolveRef = useRef<(() => void) | null>(null);
-
-  const [accessToken, setAccessToken] = useState<string | undefined>(undefined);
-  useEffect(() => {
-    setAccessToken(tryGetSupabaseAccessToken());
+  const authHeader = useCallback(async (): Promise<HeadersInit> => {
+    return { "content-type": "application/json" };
   }, []);
 
-  const loadEvents = async () => {
-    setEventsLoading(true);
-    setEventsError(null);
-    try {
-      const list = await fetchEvents(accessToken);
-      setEvents(list);
-    } catch (e: any) {
-      setEventsError(e?.message || "Failed to load events");
-    } finally {
-      setEventsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadEvents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken]);
-
-  const applyDiff = (diff: Diff) => {
-    if (!diff) return;
-    if (diff.type === "create" && (diff as any).event) {
-      const ev = (diff as any).event;
-      setEvents((prev) => [ev, ...prev]);
-    } else if (diff.type === "update" && (diff as any).event) {
-      const ev = (diff as any).event;
-      setEvents((prev) => prev.map((e) => (e.id === ev.id ? ev : e)));
-    } else if (diff.type === "delete" && (diff as any).id) {
-      const id = (diff as any).id;
-      setEvents((prev) => prev.filter((e) => e.id !== id));
-    }
-  };
-
-  async function startRecording() {
-    setRecording(true);
-    setStatus("recording");
+  async function list() {
     setError(null);
-    setInfo("");
-    setTranscript("");
-    setLastCommand(null);
-
-    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/mpeg"];
-    const mimeType =
-      (MediaRecorder as any).isTypeSupported?.(candidates[0]) ? candidates[0] :
-      (MediaRecorder as any).isTypeSupported?.(candidates[1]) ? candidates[1] :
-      (MediaRecorder as any).isTypeSupported?.(candidates[2]) ? candidates[2] :
-      (MediaRecorder as any).isTypeSupported?.(candidates[3]) ? candidates[3] :
-      "";
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-    mediaRecorderRef.current = mr;
-    chunksRef.current = [];
-
-    mr.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-    };
-    mr.onstop = () => {
-      stopResolveRef.current?.();
-    };
-
-    mr.start();
-  }
-
-  async function stopRecording() {
-    if (!mediaRecorderRef.current) return;
-    setRecording(false);
-
-    const mr = mediaRecorderRef.current;
-    const stopped = new Promise<void>((res) => {
-      stopResolveRef.current = res;
-    });
-    mr.stop();
-    await stopped;
-
     try {
-      mr.stream.getTracks().forEach((t) => t.stop());
-    } catch {}
-
-    mediaRecorderRef.current = null;
-
-    const firstType = (chunksRef.current[0] as any)?.type || "audio/webm";
-    const blob = new Blob(chunksRef.current, { type: firstType });
-
-    if (!blob.size) {
-      setStatus("error");
-      setError("Captured empty audio. Check mic permissions and try again.");
-      return;
-    }
-
-    try {
-      // 1) ASR
-      setStatus("asr");
-      const text = await transcribeAudio(blob);
-      setTranscript(text || "");
-      setInfo(`Blob ${blob.type} • ${blob.size} bytes`);
-
-      if (!text) {
-        setStatus("done");
+      const headers = await authHeader();
+      const res = await fetch("/api/calendar/list", {
+        method: "GET",
+        headers,
+        credentials: "include",
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}));
+      setRaw(json);
+      if (!res.ok) {
+        setEvents([]);
+        setError(`list failed ${res.status}`);
         return;
       }
-
-      // 2) Interpret -> normalize
-      setStatus("interpret");
-      const raw = await interpret(text, accessToken);
-      const command = normalizeCommand(raw);
-      setLastCommand(command);
-
-      // 3) Mutate with normalized command
-      setStatus("mutate");
-      const result = await mutate(command, accessToken);
-
-      if (result?.diff) applyDiff(result.diff as Diff);
-
-      // 4) Authoritative refresh
-      setStatus("refresh");
-      await loadEvents();
-
-      setStatus("done");
-    } catch (e: any) {
-      setStatus("error");
-      setError(e?.message || "Voice flow failed");
+      setEvents(normalizeToArray(json));
+    } catch {
+      setError("list error");
+      setEvents([]);
+      setRaw(null);
     }
   }
 
-  async function handleDeleteLast() {
+  function localInputToISO(v: string): string | null {
+    if (!v) return null;
     try {
-      setStatus("mutate");
-      const result = await deleteLastEvent(accessToken);
-      if (result?.deleted || result?.deleted_id) {
-        const delId = result.deleted || result.deleted_id;
-        if (delId) setEvents(prev => prev.filter(e => e.id !== delId));
-      }
-      setStatus("refresh");
-      await loadEvents();
-      setStatus("done");
-    } catch (e: any) {
-      setStatus("error");
-      setError(e?.message || "Delete failed");
+      const d = new Date(v);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString();
+    } catch {
+      return null;
     }
   }
+
+  const handleCreate = useCallback(
+    async (e?: React.FormEvent) => {
+      e?.preventDefault();
+      setLoading(true);
+      setError(null);
+      try {
+        const startISO = localInputToISO(startLocal);
+        const endISO = localInputToISO(endLocal);
+        if (!startISO || !endISO) {
+          setError("Please provide valid start and end times.");
+          setLoading(false);
+          return;
+        }
+        const headers = await authHeader();
+        const res = await fetch("/api/calendar/mutate", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            type: "create_event",
+            title: title || "(untitled)",
+            start: startISO,
+            end: endISO,
+          }),
+        });
+        const ok = res.ok;
+        await res.text().catch(() => "");
+        if (!ok) {
+          setError(`create failed ${res.status}`);
+          return;
+        }
+        show("Event created");
+        setTitle("");
+        setStartLocal("");
+        setEndLocal("");
+        await list();
+      } catch {
+        setError("create failed");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [title, startLocal, endLocal, authHeader]
+  );
+
+  const handleDeleteLast = useCallback(async () => {
+    setError(null);
+    if (!events.length) {
+      show("No events to delete");
+      return;
+    }
+    setLoading(true);
+    try {
+      const headers = await authHeader();
+      const res = await fetch("/api/calendar/mutate", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ op: "delete_last" }),
+      });
+      const ok = res.ok;
+      await res.text().catch(() => "");
+      if (!ok) {
+        setError(`delete failed ${res.status}`);
+        return;
+      }
+      show("Deleted last event");
+      await list();
+    } catch {
+      setError("delete failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [events, authHeader]);
+
+  useEffect(() => {
+    list();
+  }, []);
+
+  const hasEvents = events.length > 0;
+  const labelStyle: React.CSSProperties = { fontSize: 12, opacity: 0.7 };
 
   return (
-    <div className="p-6 space-y-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">AI Test — Events</h1>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => loadEvents()}
-            className="rounded-2xl px-3 py-2 shadow border text-sm"
-            aria-label="Refresh"
-          >
-            Refresh
-          </button>
-          <button
-            onClick={handleDeleteLast}
-            disabled={events.length === 0}
-            className={`rounded-2xl px-3 py-2 shadow border text-sm ${
-              events.length > 0 ? "opacity-100" : "opacity-40 cursor-not-allowed"
-            }`}
-            aria-label="Delete last event"
-            title="Delete the most recent event"
-          >
-            🗑️ Delete last
-          </button>
-          {!recording ? (
-            <button
-              onClick={startRecording}
-              className="rounded-2xl px-4 py-2 shadow border"
-              aria-label="Start voice"
-            >
-              🎙️ Start
-            </button>
-          ) : (
-            <button
-              onClick={stopRecording}
-              className="rounded-2xl px-4 py-2 shadow border"
-              aria-label="Stop voice"
-            >
-              ⏹️ Stop
-            </button>
-          )}
+    <main style={{ maxWidth: 768, margin: "0 auto", padding: 24 }}>
+      {/* Dev header nav */}
+      <nav
+        aria-label="Dev pages"
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          justifyContent: "flex-start",
+          marginBottom: 16,
+          paddingBottom: 8,
+          borderBottom: "1px dashed #e5e7eb",
+        }}
+      >
+        <a href="/ai-test" style={{ fontSize: 13, textDecoration: "none" }}>
+          Voice Console (dev)
+        </a>
+        <span style={{ opacity: 0.4 }}>•</span>
+        <a
+          href="/ai-test/events"
+          style={{ fontSize: 13, fontWeight: 700, textDecoration: "none" }}
+          aria-current="page"
+        >
+          Events (dev)
+        </a>
+      </nav>
+
+      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <h1 style={{ fontSize: 24, fontWeight: 700 }}>Events</h1>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => list()} disabled={loading}>Refresh</button>
+          <button onClick={handleDeleteLast} disabled={loading}>Delete last</button>
         </div>
       </header>
 
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="md:col-span-2 space-y-4">
-          <div className="rounded-2xl border p-4">
-            <div className="flex items-baseline justify-between mb-2">
-              <div className="text-sm opacity-70">Events (GET /api/calendar/list)</div>
-            </div>
-
-            {eventsLoading ? (
-              <div className="text-sm opacity-70">Loading…</div>
-            ) : eventsError ? (
-              <div className="text-sm text-red-600">Error: {eventsError}</div>
-            ) : (
-              <ul className="space-y-2">
-                {events.map((e) => (
-                  <li key={e.id} className="rounded-xl border p-3">
-                    <div className="font-medium">{e.title || "(untitled)"}</div>
-                    <div className="text-sm opacity-70">
-                      {e.start} → {e.end || "—"}
-                    </div>
-                    <div className="text-[10px] opacity-50 mt-1">id: {e.id}</div>
-                  </li>
-                ))}
-                {events.length === 0 && <li className="text-sm opacity-70">No items yet</li>}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        <div className="space-y-4">
-          <div className="rounded-2xl border p-4">
-            <div className="text-sm opacity-70">Status</div>
-            <div className="text-lg">{status}</div>
-            {info && <div className="text-sm opacity-70 mt-1">{info}</div>}
-            {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
-            {!accessToken && (
-              <div className="text-xs opacity-70 mt-2">
-                Note: With bypass on, token is not required for local.
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-2xl border p-4">
-            <div className="text-sm opacity-70 mb-2">Transcript</div>
-            <textarea
-              className="w-full rounded-xl border p-2 min-h-[120px]"
-              value={transcript}
-              readOnly
-            />
-          </div>
-
-          <div className="rounded-2xl border p-4">
-            <div className="text-sm opacity-70 mb-2">Last Command (normalized)</div>
-            <textarea
-              className="w-full rounded-xl border p-2 min-h-[120px]"
-              value={lastCommand ? JSON.stringify(lastCommand, null, 2) : ""}
-              readOnly
-            />
-          </div>
+      {/* Voice Commands on Events page */}
+      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Voice Commands</div>
+        <MicCapture
+          onSuccess={async () => { show("Voice command applied"); await list(); }}
+          onCreate={async () => { show("Event created"); await list(); }}
+          onDelete={async () => { show("Deleted last event"); await list(); }}
+        />
+        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
+          Tip: After any voice action, the list refreshes automatically.
         </div>
       </section>
-    </div>
+
+      {/* Quick Create form */}
+      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Quick Create</div>
+        <form onSubmit={handleCreate} style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 1fr" }}>
+          <input
+            placeholder="Title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            style={{ gridColumn: "1 / -1", padding: 12, borderRadius: 12, border: "1px solid #ccc" }}
+          />
+          <label style={{ ...labelStyle, gridColumn: "1 / -1" }}>Times are in your local timezone</label>
+          <input
+            type="datetime-local"
+            value={startLocal}
+            onChange={(e) => setStartLocal(e.target.value)}
+            style={{ padding: 12, borderRadius: 12, border: "1px solid #ccc" }}
+          />
+          <input
+            type="datetime-local"
+            value={endLocal}
+            onChange={(e) => setEndLocal(e.target.value)}
+            style={{ padding: 12, borderRadius: 12, border: "1px solid #ccc" }}
+          />
+          <div style={{ gridColumn: "1 / -1" }}>
+            <button type="submit" disabled={loading}>Create event</button>
+          </div>
+        </form>
+        {error ? <div style={{ color: "#b91c1c", marginTop: 8 }}>Error: {error}</div> : null}
+      </section>
+
+      {/* Events list / empty state */}
+      <section style={{ border: "1px solid #ddd", borderRadius: 16, marginTop: 16 }}>
+        {!hasEvents ? (
+          <div style={{ padding: 24, textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 600 }}>No events yet</div>
+            <p style={{ fontSize: 14, opacity: 0.7, marginTop: 6 }}>
+              Use <span style={{ fontWeight: 600 }}>Quick Create</span> above or go to <a href="/ai-test">/ai-test</a> to add one by voice.
+            </p>
+          </div>
+        ) : (
+          <div style={{ maxHeight: 420, overflow: "auto" }}>
+            <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+              {events.map((e) => (
+                <li key={e.id} style={{ padding: 16, borderTop: "1px solid #eee" }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                    <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {e.title || "(untitled)"}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.6 }}>id: {e.id.slice(0, 8)}…</div>
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 14 }}>
+                    {e.start ? <span>Start: {formatLocal(e.start)}</span> : null}
+                    {e.end ? <span style={{ marginLeft: 12 }}>End: {formatLocal(e.end)}</span> : null}
+                  </div>
+                  {e.created_at ? (
+                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>Created: {formatLocal(e.created_at)}</div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </section>
+
+      {/* Raw debug */}
+      <details style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600 }}>Debug payload (/calendar/list)</summary>
+        <pre style={{ marginTop: 12, maxHeight: 288, overflow: "auto", fontSize: 12 }}>
+{JSON.stringify(raw, null, 2)}
+        </pre>
+      </details>
+
+      {toast}
+    </main>
   );
 }
