@@ -2,31 +2,44 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { interpret, mutate } from "../../lib/ai";
+import ConfirmCommandSheet from "./ConfirmCommandSheet";
 
-type SR = typeof window extends any
-  ? (Window & typeof globalThis & { webkitSpeechRecognition?: any; SpeechRecognition?: any })["SpeechRecognition"]
-  : any;
+type Props = {
+  onSuccess?: () => void; // events page uses this to refresh + toast
+};
 
-export default function MicCapture() {
+type Phase = "idle" | "listening" | "interpreting" | "confirming" | "applying" | "done" | "error";
+
+declare global {
+  interface Window {
+    webkitSpeechRecognition?: any;
+    SpeechRecognition?: any;
+  }
+}
+
+export default function MicCapture({ onSuccess }: Props) {
   const [supported, setSupported] = useState<boolean>(true);
   const [recording, setRecording] = useState<boolean>(false);
   const [transcript, setTranscript] = useState<string>("");
-  const [status, setStatus] = useState<string>("");
+  const [status, setStatus] = useState<string>("Idle");
   const [busy, setBusy] = useState<boolean>(false);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [command, setCommand] = useState<Record<string, any> | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const recognitionRef = useRef<InstanceType<SR> | null>(null);
-
-  const SpeechRecognitionCtor = useMemo(() => {
+  const SR = useMemo(() => {
     if (typeof window === "undefined") return undefined;
-    return (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    return window.SpeechRecognition || window.webkitSpeechRecognition;
   }, []);
 
+  const recRef = useRef<any>(null);
+
   useEffect(() => {
-    if (!SpeechRecognitionCtor) {
+    if (!SR) {
       setSupported(false);
       return;
     }
-    const r = new SpeechRecognitionCtor();
+    const r: any = new SR();
     r.lang = "en-US";
     r.interimResults = true;
     r.continuous = true;
@@ -40,104 +53,130 @@ export default function MicCapture() {
         if (event.results[i].isFinal) finalText += chunk + " ";
         else interimText += chunk + " ";
       }
-      setTranscript((prev) => {
-        const merged = (prev.trim() + " " + (finalText || interimText)).trim();
-        return merged.replace(/\s+/g, " ");
-      });
+      const merged = (finalText || interimText).trim().replace(/\s+/g, " ");
+      if (merged) setTranscript(merged);
     };
     r.onerror = (e: any) => {
-      setStatus(`Error: ${e?.error || "unknown"}`);
+      setStatus(`Mic error`);
       setRecording(false);
+      setError(e?.message || e?.error || "Microphone error.");
     };
     r.onend = () => {
       setRecording(false);
       setStatus("Stopped");
     };
 
-    recognitionRef.current = r;
+    recRef.current = r;
     setSupported(true);
 
     return () => {
       try {
         r.stop();
       } catch {}
-      recognitionRef.current = null;
+      recRef.current = null;
     };
-  }, [SpeechRecognitionCtor]);
+  }, [SR]);
 
   const start = useCallback(() => {
-    if (!recognitionRef.current) return;
+    if (!recRef.current) return;
     setTranscript("");
+    setError(null);
+    setPhase("listening");
     setStatus("Starting…");
     setRecording(true);
     try {
-      recognitionRef.current.start();
+      recRef.current.start();
     } catch {
       setRecording(false);
       setStatus("Failed to start mic");
+      setPhase("idle");
     }
   }, []);
 
   const stop = useCallback(() => {
-    if (!recognitionRef.current) return;
+    if (!recRef.current) return;
     setStatus("Stopping…");
     try {
-      recognitionRef.current.stop();
+      recRef.current.stop();
     } catch {
       setStatus("Failed to stop mic");
     }
   }, []);
 
-  const send = useCallback(async () => {
-    if (!transcript.trim() || busy) return;
+  // 1) Interpret → show confirmation (no mutate yet)
+  const interpretThenConfirm = useCallback(async () => {
+    const utterance = transcript.trim();
+    if (!utterance || busy) return;
     setBusy(true);
+    setError(null);
+    setPhase("interpreting");
     setStatus("Interpreting…");
     try {
-      // 1) Ask backend/LLM to interpret free text
-      const interpretation: any = await interpret(transcript.trim());
+      // IMPORTANT: pass a STRING, not an object, to avoid double-wrapping { text: { text: "…" } }
+      const out: any = await interpret(utterance);
 
-      // 2) UNWRAP the command payload for /calendar/mutate
-      let command: any = interpretation?.command ?? interpretation;
-      if (!command || typeof command !== "object") {
+      const cmd = (out && (out.command ?? out)) || null;
+      if (!cmd || typeof cmd !== "object") {
+        setPhase("error");
         setStatus("Failed");
-        alert("Interpreter returned an empty command.");
+        setError("Interpreter returned an empty command.");
         return;
       }
 
-      // 3) Fill sensible defaults for the prototype
-      if (!command.type) command.type = "create_event";
-
-      // 4) Polish: if title is missing/untitled, use the transcript (trimmed to 60 chars)
-      const t = transcript.trim();
-      if ((!command.title || command.title === "untitled") && t) {
-        command.title = t.length > 60 ? t.slice(0, 57) + "..." : t;
+      // Light normalization for display only
+      const c: any = { ...cmd };
+      if (!c.op && c.type) c.op = c.type;
+      if ((!c.title || c.title === "untitled") && utterance) {
+        c.title = utterance.length > 60 ? utterance.slice(0, 57) + "…" : utterance;
       }
 
-      setStatus("Mutating…");
-      const result: any = await mutate(command);
-
-      setStatus("Done");
-      setTranscript("");
-      console.log("interpret:", interpretation);
-      console.log("mutate result:", result);
-
-      if (result?.ok) {
-        alert("Event updated. Check /ai-test/events to confirm.");
-      } else {
-        alert(`Mutation failed: ${result?.error ?? "unknown error"}`);
-      }
+      setCommand(c);
+      setPhase("confirming");
+      setStatus("Review and confirm");
     } catch (e: any) {
-      setStatus(`Failed: ${e?.message || "unknown error"}`);
+      setPhase("error");
+      setStatus("Failed");
+      setError(e?.message || "Interpret failed");
     } finally {
       setBusy(false);
     }
   }, [transcript, busy]);
 
+  // 2) Confirm → mutate
+  const applyMutation = useCallback(async () => {
+    if (!command || busy) return;
+    setBusy(true);
+    setStatus("Applying…");
+    setPhase("applying");
+    try {
+      const result: any = await mutate(command);
+      if (!result || result.error) {
+        setPhase("error");
+        setStatus("Failed");
+        setError(result?.error || "Mutation failed");
+        return;
+      }
+      setPhase("done");
+      setStatus("Done");
+      setTranscript("");
+      setCommand(null);
+      onSuccess?.();
+    } catch (e: any) {
+      setPhase("error");
+      setStatus("Failed");
+      setError(e?.message || "Mutation failed");
+    } finally {
+      setBusy(false);
+    }
+  }, [command, busy, onSuccess]);
+
   if (!supported) {
     return (
       <div className="rounded-2xl border p-4 shadow-sm">
         <div className="text-lg font-semibold">Voice Input</div>
-        <p className="mt-1 text-sm">Your browser does not support the Web Speech API. Use manual text input instead.</p>
+        <p className="mt-1 text-sm">
+          Web Speech API not available. Type a request and click Interpret.
+        </p>
       </div>
     );
   }
@@ -146,7 +185,7 @@ export default function MicCapture() {
     <div className="rounded-2xl border p-4 shadow-sm space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold">Voice Input</div>
-        <div className="text-xs opacity-70">{status || "Idle"}</div>
+        <div className="text-xs opacity-70">{status}</div>
       </div>
 
       <div className="flex gap-2">
@@ -156,48 +195,50 @@ export default function MicCapture() {
             className="rounded-2xl px-4 py-2 shadow border text-sm hover:shadow-md active:scale-[0.99]"
             disabled={busy}
           >
-            🎤 Start
+            Start
           </button>
         ) : (
           <button
             onClick={stop}
             className="rounded-2xl px-4 py-2 shadow border text-sm hover:shadow-md active:scale-[0.99]"
           >
-            ⏹ Stop
+            Stop
           </button>
         )}
+        <input
+          className="flex-1 rounded-2xl px-3 py-2 border text-sm"
+          placeholder="Say or type a request…"
+          value={transcript}
+          onChange={(e) => setTranscript(e.target.value)}
+          disabled={busy}
+        />
         <button
-            onClick={send}
-            className="rounded-2xl px-4 py-2 shadow border text-sm hover:shadow-md active:scale-[0.99]"
-            disabled={!transcript.trim() || busy}
-        >
-          ➤ Send
-        </button>
-        <button
-          onClick={() => setTranscript("")}
+          onClick={interpretThenConfirm}
           className="rounded-2xl px-4 py-2 shadow border text-sm hover:shadow-md active:scale-[0.99]"
-          disabled={busy && recording}
+          disabled={!transcript.trim() || busy}
         >
-          Clear
+          Interpret
         </button>
       </div>
 
-      <textarea
-        className="w-full min-h-[120px] rounded-xl border p-3 text-sm leading-5"
-        placeholder="Transcript will appear here…"
-        value={transcript}
-        onChange={(e) => setTranscript(e.target.value)}
+      {error && (
+        <div className="rounded-xl border border-red-300 bg-red-50 text-red-800 px-3 py-2 text-sm">
+          {error}
+        </div>
+      )}
+
+      <ConfirmCommandSheet
+        open={phase === "confirming" && !!command}
+        command={command}
+        onCancel={() => {
+          setPhase("idle");
+          setStatus("Idle");
+        }}
+        onConfirm={applyMutation}
+        busy={busy}
       />
-      <p className="text-xs opacity-70">
-        Tip: After sending, open <a className="underline" href="/ai-test/events">/ai-test/events</a> to verify the event.
-      </p>
-      <div className="text-xs opacity-70">
-        View current events at{" "}
-        <a className="underline" href="/ai-test/events">
-          /ai-test/events
-        </a>
-        .
-      </div>
+
+      <p className="text-xs opacity-70">Phase: {phase}</p>
     </div>
   );
 }

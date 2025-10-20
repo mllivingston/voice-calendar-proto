@@ -146,3 +146,7 @@ Tag meaningful milestones:
 git tag -a action-12.5 -m "Frontend guards + safeFetch"
 git push origin action-12.5
 End of Playbook 10-17D (Consolidated 10-17A + 10-17C + bypass auth workflow validated in Actions 10–11; amended with runtime guards in Action 12.5).
+Added in update 10-20 : Repo-First Edit: Before any file change, assistant must fetch the current file from the Git connector and cite it.
+Visual-Impacting Label: Any change that can affect layout must carry a VISUAL-IMPACTING label and default to “off” until approved.
+Function-Only Patch Mode: When the goal is functional (e.g., confirmation step), edit only the smallest unit that implements that function (here: MicCapture) and do not alter consumer page visuals.
+Import Path Lock: Resolve imports relative to current file; do not introduce new alias paths unless they already exist.

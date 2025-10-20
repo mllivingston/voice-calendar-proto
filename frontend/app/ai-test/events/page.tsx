@@ -2,13 +2,26 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { safeFetch } from "../../../lib/safeFetch";
-import { isListPayload, isMutateOk, ListPayload, EventItem } from "../../../lib/schemas";
+import { authHeader } from "../../../lib/supabase";
 
-// Client-only mic console
+// Client-only mic console (keeps SSR off exactly as in Action 12)
 const MicCapture = dynamic(() => import("../MicCapture"), { ssr: false });
 
-function normalizeToArray(data: ListPayload): EventItem[] {
+/** -----------------------
+ * Types and helpers
+ * ----------------------*/
+type EventItem = {
+  id: string;
+  title?: string | null;
+  start?: string | null;
+  end?: string | null;
+  created_at?: string | null;
+  [k: string]: any;
+};
+
+type ListResponse = EventItem[] | { events?: EventItem[] } | Record<string, any>;
+
+function normalizeToArray(data: ListResponse): EventItem[] {
   if (Array.isArray(data)) return data;
   if (data && Array.isArray((data as any).events)) return (data as any).events;
   return [];
@@ -36,159 +49,123 @@ function useToast() {
   const [visible, setVisible] = useState(false);
   const timeoutRef = useRef<number | null>(null);
 
-  const show = useCallback((text: string, ms = 1800) => {
+  const show = useCallback((text: string) => {
     setMsg(text);
     setVisible(true);
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = window.setTimeout(() => setVisible(false), ms);
+    timeoutRef.current = window.setTimeout(() => setVisible(false), 2200);
   }, []);
 
-  useEffect(() => () => timeoutRef.current && window.clearTimeout(timeoutRef.current), []);
-
-  const node = (
+  const toast = visible ? (
     <div
-      aria-live="polite"
       style={{
         position: "fixed",
-        left: 0,
-        right: 0,
-        bottom: 16,
-        display: "flex",
-        justifyContent: "center",
-        pointerEvents: "none",
-        transition: "opacity 200ms ease",
-        opacity: visible ? 1 : 0,
-        zIndex: 2147483647,
-      }}
-    >
-      <div
-        style={{
-          pointerEvents: "auto",
-          background: "rgba(255,255,255,0.95)",
-          border: "1px solid rgba(0,0,0,0.1)",
-          borderRadius: 16,
-          padding: "8px 12px",
-          boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
-        }}
-      >
-        <span style={{ fontSize: 14 }}>{msg}</span>
-      </div>
-    </div>
-  );
-
-  return { show, node };
-}
-
-function ErrorBanner({ message, detail }: { message: string; detail?: any }) {
-  if (!message) return null;
-  return (
-    <div
-      role="status"
-      style={{
-        border: "1px solid #fecaca",
-        background: "#fff1f2",
-        color: "#991b1b",
-        padding: 12,
+        bottom: 20,
+        left: "50%",
+        transform: "translateX(-50%)",
+        background: "rgba(0,0,0,0.85)",
+        color: "white",
+        padding: "10px 14px",
         borderRadius: 12,
+        fontSize: 13,
+        zIndex: 50,
       }}
+      role="status"
+      aria-live="polite"
     >
-      <div style={{ fontWeight: 600, fontSize: 14 }}>Error: {message}</div>
-      {detail ? (
-        <pre
-          style={{
-            marginTop: 8,
-            fontSize: 12,
-            maxHeight: 160,
-            overflow: "auto",
-            background: "rgba(0,0,0,0.03)",
-            padding: 8,
-            borderRadius: 8,
-          }}
-        >
-{typeof detail === "string" ? detail : JSON.stringify(detail, null, 2)}
-        </pre>
-      ) : null}
+      {msg}
     </div>
-  );
+  ) : null;
+
+  return { show, toast };
 }
 
-export default function EventsPage() {
+/** -----------------------
+ * Page component
+ * ----------------------*/
+export default function EventsDevPage() {
+  const { show, toast } = useToast();
+
+  // data
   const [events, setEvents] = useState<EventItem[]>([]);
   const [raw, setRaw] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [errMsg, setErrMsg] = useState<string>("");
-  const [errDetail, setErrDetail] = useState<any>(null);
 
+  // ui state
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // quick create form
   const [title, setTitle] = useState("");
   const [startLocal, setStartLocal] = useState("");
   const [endLocal, setEndLocal] = useState("");
 
-  const { show, node: toast } = useToast();
-
-  const authHeader = useCallback(async (): Promise<HeadersInit> => {
-    return { "content-type": "application/json" };
+  /** ---- list ---- */
+  const list = useCallback(async () => {
+    setError(null);
+    try {
+      const headers = await authHeader();
+      const res = await fetch("/api/calendar/list", {
+        method: "GET",
+        headers,
+        credentials: "include",
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}));
+      setRaw(json);
+      if (!res.ok) {
+        setEvents([]);
+        setError(`list failed ${res.status}`);
+        return;
+      }
+      setEvents(normalizeToArray(json));
+    } catch {
+      setError("list error");
+      setEvents([]);
+      setRaw(null);
+    }
   }, []);
 
-  async function list() {
-    setErrMsg("");
-    setErrDetail(null);
-    const headers = await authHeader();
-    const res = await safeFetch<ListPayload>(
-      "/api/calendar/list",
-      { method: "GET", headers, cache: "no-store" },
-      isListPayload
-    );
-    if (!res.ok) {
-      setEvents([]);
-      setRaw(res.raw ?? null);
-      setErrMsg(res.error);
-      setErrDetail(res.raw);
-      return;
-    }
-    setRaw(res.data);
-    setEvents(normalizeToArray(res.data));
-  }
-
+  /** ---- local datetime input → ISO ---- */
   function localInputToISO(v: string): string | null {
     if (!v) return null;
-    const d = new Date(v);
-    if (isNaN(d.getTime())) return null;
-    return d.toISOString();
+    try {
+      const d = new Date(v);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString();
+    } catch {
+      return null;
+    }
   }
 
+  /** ---- create (Quick Create form) ---- */
   const handleCreate = useCallback(
     async (e?: React.FormEvent) => {
       e?.preventDefault();
       setLoading(true);
-      setErrMsg("");
-      setErrDetail(null);
+      setError(null);
       try {
         const startISO = localInputToISO(startLocal);
         const endISO = localInputToISO(endLocal);
         if (!startISO || !endISO) {
-          setErrMsg("Please provide valid start and end times.");
+          setError("Please provide valid start and end times.");
           setLoading(false);
           return;
         }
         const headers = await authHeader();
-        const res = await safeFetch(
-          "/api/calendar/mutate",
-          {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              type: "create_event",
-              title: title || "(untitled)",
-              start: startISO,
-              end: endISO,
-            }),
-          },
-          isMutateOk
-        );
-
-        if (!res.ok) {
-          setErrMsg(`Create failed: ${res.error}`);
-          setErrDetail(res.raw);
+        const res = await fetch("/api/calendar/mutate", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            type: "create_event",
+            title: title || "(untitled)",
+            start: startISO,
+            end: endISO,
+          }),
+        });
+        const ok = res.ok;
+        await res.text().catch(() => "");
+        if (!ok) {
+          setError(`create failed ${res.status}`);
           return;
         }
         show("Event created");
@@ -196,16 +173,18 @@ export default function EventsPage() {
         setStartLocal("");
         setEndLocal("");
         await list();
+      } catch {
+        setError("create failed");
       } finally {
         setLoading(false);
       }
     },
-    [title, startLocal, endLocal, authHeader]
+    [title, startLocal, endLocal, authHeader, list, show]
   );
 
+  /** ---- delete last ---- */
   const handleDeleteLast = useCallback(async () => {
-    setErrMsg("");
-    setErrDetail(null);
+    setError(null);
     if (!events.length) {
       show("No events to delete");
       return;
@@ -213,37 +192,38 @@ export default function EventsPage() {
     setLoading(true);
     try {
       const headers = await authHeader();
-      const res = await safeFetch(
-        "/api/calendar/mutate",
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ op: "delete_last" }),
-        },
-        isMutateOk
-      );
-
-      if (!res.ok) {
-        setErrMsg(`Delete failed: ${res.error}`);
-        setErrDetail(res.raw);
+      const res = await fetch("/api/calendar/mutate", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ op: "delete_last" }),
+      });
+      const ok = res.ok;
+      await res.text().catch(() => "");
+      if (!ok) {
+        setError(`delete failed ${res.status}`);
         return;
       }
       show("Deleted last event");
       await list();
+    } catch {
+      setError("delete failed");
     } finally {
       setLoading(false);
     }
-  }, [events, authHeader]);
+  }, [events, authHeader, list, show]);
 
   useEffect(() => {
     list();
-  }, []);
+  }, [list]);
 
   const hasEvents = events.length > 0;
-  const labelStyle: React.CSSProperties = { fontSize: 12, opacity: 0.7 };
 
+  /** -----------------------
+   * Render (matches Action-12 layout)
+   * ----------------------*/
   return (
-    <main style={{ maxWidth: 768, margin: "0 auto", padding: 24 }}>
+    <main style={{ maxWidth: 840, margin: "0 auto", padding: 24 }}>
+      {/* Dev header nav */}
       <nav
         aria-label="Dev pages"
         style={{
@@ -256,11 +236,18 @@ export default function EventsPage() {
           borderBottom: "1px dashed #e5e7eb",
         }}
       >
-        <a href="/ai-test" style={{ fontSize: 13, textDecoration: "none" }}>
+        <a
+          href="/ai-test"
+          style={{ fontSize: 13, textDecoration: "none" }}
+        >
           Voice Console (dev)
         </a>
         <span style={{ opacity: 0.4 }}>•</span>
-        <a href="/ai-test/events" style={{ fontSize: 13, fontWeight: 700, textDecoration: "none" }} aria-current="page">
+        <a
+          href="/ai-test/events"
+          style={{ fontSize: 13, fontWeight: 700, textDecoration: "none" }}
+          aria-current="page"
+        >
           Events (dev)
         </a>
       </nav>
@@ -273,54 +260,80 @@ export default function EventsPage() {
         </div>
       </header>
 
-      {errMsg ? <div style={{ marginTop: 12 }}><ErrorBanner message={errMsg} detail={errDetail} /></div> : null}
-
+      {/* Voice Commands on Events page */}
       <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
         <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Voice Commands</div>
         <MicCapture
-          onSuccess={async () => { show("Voice command applied"); await list(); }}
-          onCreate={async () => { show("Event created"); await list(); }}
-          onDelete={async () => { show("Deleted last event"); await list(); }}
+          onSuccess={async () => {
+            show("Voice command applied");
+            await list();
+          }}
         />
         <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
           Tip: After any voice action, the list refreshes automatically.
         </div>
       </section>
 
+      {/* Quick Create */}
       <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
-        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Quick Create</div>
-        <form onSubmit={handleCreate} style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 1fr" }}>
+        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Quick Create</div>
+
+        <form onSubmit={handleCreate} style={{ display: "grid", gap: 12 }}>
           <input
             placeholder="Title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            style={{ gridColumn: "1 / -1", padding: 12, borderRadius: 12, border: "1px solid #ccc" }}
+            style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
           />
-          <label style={{ ...labelStyle, gridColumn: "1 / -1" }}>Times are in your local timezone</label>
-          <input
-            type="datetime-local"
-            value={startLocal}
-            onChange={(e) => setStartLocal(e.target.value)}
-            style={{ padding: 12, borderRadius: 12, border: "1px solid #ccc" }}
-          />
-          <input
-            type="datetime-local"
-            value={endLocal}
-            onChange={(e) => setEndLocal(e.target.value)}
-            style={{ padding: 12, borderRadius: 12, border: "1px solid #ccc" }}
-          />
-          <div style={{ gridColumn: "1 / -1" }}>
-            <button type="submit" disabled={loading}>Create event</button>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <input
+              type="datetime-local"
+              value={startLocal}
+              onChange={(e) => setStartLocal(e.target.value)}
+              style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+            />
+            <input
+              type="datetime-local"
+              value={endLocal}
+              onChange={(e) => setEndLocal(e.target.value)}
+              style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+            />
+          </div>
+          <div>
+            <button disabled={loading}>Create event</button>
           </div>
         </form>
       </section>
 
-      <section style={{ border: "1px solid #ddd", borderRadius: 16, marginTop: 16 }}>
+      {/* Errors */}
+      {error && (
+        <div
+          style={{
+            border: "1px solid #fecaca",
+            background: "#fee2e2",
+            color: "#991b1b",
+            borderRadius: 12,
+            padding: 12,
+            marginTop: 16,
+            fontSize: 14,
+          }}
+        >
+          Error: {error}
+        </div>
+      )}
+
+      {/* Events list */}
+      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+          <div style={{ fontSize: 14, opacity: 0.7 }}>Events (GET /api/calendar/list)</div>
+        </div>
+
         {!hasEvents ? (
           <div style={{ padding: 24, textAlign: "center" }}>
             <div style={{ fontSize: 16, fontWeight: 600 }}>No events yet</div>
             <p style={{ fontSize: 14, opacity: 0.7, marginTop: 6 }}>
-              Use <span style={{ fontWeight: 600 }}>Quick Create</span> above or go to <a href="/ai-test">/ai-test</a> to add one by voice.
+              Use <span style={{ fontWeight: 600 }}>Quick Create</span> above or go to{" "}
+              <a href="/ai-test">/ai-test</a> to add one by voice.
             </p>
           </div>
         ) : (
@@ -339,7 +352,9 @@ export default function EventsPage() {
                     {e.end ? <span style={{ marginLeft: 12 }}>End: {formatLocal(e.end)}</span> : null}
                   </div>
                   {e.created_at ? (
-                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>Created: {formatLocal(e.created_at)}</div>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                      Created: {formatLocal(e.created_at)}
+                    </div>
                   ) : null}
                 </li>
               ))}
@@ -348,8 +363,11 @@ export default function EventsPage() {
         )}
       </section>
 
+      {/* Raw debug payload */}
       <details style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
-        <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600 }}>Debug payload (/calendar/list)</summary>
+        <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600 }}>
+          Debug payload (/calendar/list)
+        </summary>
         <pre style={{ marginTop: 12, maxHeight: 288, overflow: "auto", fontSize: 12 }}>
 {JSON.stringify(raw, null, 2)}
         </pre>
