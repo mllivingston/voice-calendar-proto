@@ -9,10 +9,10 @@ Environment-safe bootstraps precede any Node/Python-dependent command.
 Reversible. Always show rollback for git or file changes.
 1 · Terminal Protocol (ALWAYS)
 Every block must specify: Terminal · cwd · Env · Assumptions · Rollback.
-Role	Typical use	Keep running
-FRONTEND TERMINAL	npm run dev (Next.js)	✅
-BACKEND TERMINAL	python -m uvicorn … (FastAPI)	✅
-NEW TEMP TERMINAL	git · curl · diagnostics	🚫
+Role / Typical use / Keep running
+FRONTEND TERMINAL — npm run dev (Next.js) — ✅
+BACKEND TERMINAL — python -m uvicorn … (FastAPI) — ✅
+NEW TEMP TERMINAL — git · curl · diagnostics — 🚫
 1A · CWD & Jump Rules
 Rule CWD-1: Every command must include an explicit jump.
 Canonical jumps
@@ -71,13 +71,14 @@ export AUTH_BYPASS=true|yes|1 before backend start.
 FastAPI short-circuits auth; no token needed.
 Real-token mode (prod tests):
 omit AUTH_BYPASS; endpoints require valid HS256 bearer.
-⚠ Do not mix modes in a session.
+Do not mix modes in a session.
 If switching modes → STOP BACKEND → restart with new flag.
 7 · Backend Launch Invariant
 Always launch from repo root:
 python -m uvicorn server.main:app --reload --log-level debug --reload-dir server
-If running inside /server, set:
-export PYTHONPATH="$(pwd)/.." and use main:app.
+If running inside /server:
+export PYTHONPATH="$(pwd)/.."
+use main:app.
 Stop stale servers before each run (Ctrl +C).
 8 · Deterministic Token Handling (real-token mode only)
 Never depend on prior exports.
@@ -89,8 +90,7 @@ Mutate: send the command object directly (unwrapped).
 Delete: supported shape {"op":"delete_last"} for “Delete last”.
 Authoritative refresh: after any successful mutate → refetch /api/calendar/list.
 10 · Next.js Proxy Pattern (safe forward auth)
-File → frontend/app/api/calendar/mutate/route.ts
-(see original content in 10-17A; unchanged pattern)
+File → frontend/app/api/calendar/mutate/route.ts (see original content in 10-17A; unchanged pattern)
 Rules →
 Upstream http://127.0.0.1:8000
 Always forward Authorization
@@ -122,7 +122,7 @@ Mic flow
 Import path rules
 ASR triage checklist
 17 · Stability Post-Action 11
-Bypass confirmed working in server/auth/__init__.py with true/yes/1.
+Bypass confirmed working in server/auth/init.py with true/yes/1.
 Interpret normalization prevents silent no-ops.
 Delete last uses backend-supported op:"delete_last".
 Smoke tests now token-free when bypass on.
@@ -134,5 +134,15 @@ Load backend env in BACKEND TERMINAL.
 Next.js proxies never throw; always forward auth.
 Curl probes must be method-correct & jq-free.
 CWD-1 enforced before any location-sensitive command.
-End of Playbook 10-17D
-(Consolidated 10-17A + 10-17C + bypass auth workflow validated in Actions 10–11.)
+19 · Playbook Addendum (10-17D+)
+Contract Source of Truth & Guards
+Backend models define the contract; frontend validates responses at runtime.
+All network calls use safeFetch with a schema guard from lib/schemas.ts.
+On failure, show an inline ErrorBanner; do not crash the page.
+Dev Pages & Flags
+/ai-test and /ai-test/events are dev-only surfaces. Guard their nav with NEXT_PUBLIC_DEV_UI when preparing to ship.
+Git Save-Points
+Tag meaningful milestones:
+git tag -a action-12.5 -m "Frontend guards + safeFetch"
+git push origin action-12.5
+End of Playbook 10-17D (Consolidated 10-17A + 10-17C + bypass auth workflow validated in Actions 10–11; amended with runtime guards in Action 12.5).
