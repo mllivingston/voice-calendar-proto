@@ -212,6 +212,32 @@ export default function EventsDevPage() {
     }
   }, [events, authHeader, list, show]);
 
+  /** ---- undo last ---- */
+  const handleUndoLast = useCallback(async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      const headers = await authHeader();
+      const res = await fetch("/api/calendar/mutate", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ op: "undo_last" }),
+      });
+      const ok = res.ok;
+      await res.text().catch(() => "");
+      if (!ok) {
+        setError(`undo failed ${res.status}`);
+        return;
+      }
+      show("Undid last change");
+      await list();
+    } catch {
+      setError("undo failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [authHeader, list, show]);
+
   useEffect(() => {
     list();
   }, [list]);
@@ -257,6 +283,7 @@ export default function EventsDevPage() {
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => list()} disabled={loading}>Refresh</button>
           <button onClick={handleDeleteLast} disabled={loading}>Delete last</button>
+          <button onClick={handleUndoLast} disabled={loading}>Undo last</button>
         </div>
       </header>
 
