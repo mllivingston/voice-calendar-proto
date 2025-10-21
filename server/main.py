@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 
 from server.auth import get_current_user  # HS256 or bypass per your setup
+from server.routes import calendar  # added: mount external calendar router
 
 app = FastAPI(title="Voice Calendar Proto")
 
@@ -66,7 +67,6 @@ def _apply_delete_last(uid: str) -> Diff:
     db = _user_db(uid)
     if not db:
         return {"type": "noop"}
-    # pick newest by created_at if present
     target_id, latest_ts = None, ""
     for ev in db.values():
         ts = ev.get("created_at") or ""
@@ -130,39 +130,4 @@ def ai_interpret(inp: InterpretIn, user=Depends(get_current_user)) -> Dict[str, 
         return {"command": {"op": "delete_last"}}
     return {"command": {"op": "noop", "payload": {"text": text}}}
 
-@app.get("/calendar/list")
-def calendar_list(user=Depends(get_current_user)) -> List[Event]:
-    return list_events_for(user.sub)
-
-@app.get("/calendar/history")
-def calendar_history(limit: int = 5, user=Depends(get_current_user)) -> Dict[str, Any]:
-    h = _hist(user.sub)
-    return {"user_id": user.sub, "limit": limit, "items": list(reversed(h[-limit:])), "total": len(h)}
-
-@app.post("/calendar/mutate")
-def calendar_mutate(body: AnyCmd, user=Depends(get_current_user)) -> Dict[str, Any]:
-    uid = user.sub
-
-    if body.get("type") in {"create_event", "create"}:
-        cmd = CreateEventCmd(**body)
-        ev: Event = {"id": None, "title": cmd.title or "(untitled)", "start": cmd.start, "end": cmd.end, "data": cmd.data or {}}
-        diff = _apply_create(uid, ev)
-        return {"status": "ok", "diff": diff, "events": list_events_for(uid)}
-
-    if body.get("op") == "delete_last":
-        diff = _apply_delete_last(uid)
-        return {"status": "ok", "diff": diff, "events": list_events_for(uid)}
-
-    if body.get("op") == "undo_last":
-        diff = _apply_undo_last(uid)
-        return {"status": "ok", "diff": diff, "events": list_events_for(uid)}
-
-    if body.get("op") == "undo_n":
-        out = _apply_undo_n(uid, body.get("n", 0))
-        return {"status": "ok", "diff": out, "events": list_events_for(uid)}
-
-    if body.get("op") == "noop":
-        _hist(uid).append({"kind": "noop", "ts": _now_iso(), "payload": body.get("payload")})
-        return {"status": "ok", "diff": {"type": "noop"}, "events": list_events_for(uid)}
-
-    raise HTTPException(status_code=422, detail="unsupported command")
+app.include_router(calendar.router)
