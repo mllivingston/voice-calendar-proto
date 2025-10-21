@@ -99,6 +99,9 @@ export default function EventsDevPage() {
   const [startLocal, setStartLocal] = useState("");
   const [endLocal, setEndLocal] = useState("");
 
+  // silent history preview data (Action 15)
+  const [historySample, setHistorySample] = useState<any[]>([]);
+
   /** ---- list ---- */
   const list = useCallback(async () => {
     setError(null);
@@ -173,6 +176,7 @@ export default function EventsDevPage() {
         setStartLocal("");
         setEndLocal("");
         await list();
+        await refreshHistory(); // Action 15 silent check
       } catch {
         setError("create failed");
       } finally {
@@ -205,6 +209,7 @@ export default function EventsDevPage() {
       }
       show("Deleted last event");
       await list();
+      await refreshHistory(); // Action 15 silent check
     } catch {
       setError("delete failed");
     } finally {
@@ -231,6 +236,7 @@ export default function EventsDevPage() {
       }
       show("Undid last change");
       await list();
+      await refreshHistory(); // Action 15 silent check
     } catch {
       setError("undo failed");
     } finally {
@@ -238,9 +244,27 @@ export default function EventsDevPage() {
     }
   }, [authHeader, list, show]);
 
+  /** ---- history fetch (silent) ---- */
+  const refreshHistory = useCallback(async (limit = 5) => {
+    try {
+      const headers = await authHeader();
+      const res = await fetch(`/api/calendar/history?limit=${limit}`, {
+        method: "GET",
+        headers,
+        credentials: "include",
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json && Array.isArray(json.items)) setHistorySample(json.items);
+    } catch {
+      /* silent */
+    }
+  }, []);
+
   useEffect(() => {
     list();
-  }, [list]);
+    refreshHistory();
+  }, [list, refreshHistory]);
 
   const hasEvents = events.length > 0;
 
@@ -262,10 +286,7 @@ export default function EventsDevPage() {
           borderBottom: "1px dashed #e5e7eb",
         }}
       >
-        <a
-          href="/ai-test"
-          style={{ fontSize: 13, textDecoration: "none" }}
-        >
+        <a href="/ai-test" style={{ fontSize: 13, textDecoration: "none" }}>
           Voice Console (dev)
         </a>
         <span style={{ opacity: 0.4 }}>•</span>
@@ -281,9 +302,15 @@ export default function EventsDevPage() {
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <h1 style={{ fontSize: 24, fontWeight: 700 }}>Events</h1>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => list()} disabled={loading}>Refresh</button>
-          <button onClick={handleDeleteLast} disabled={loading}>Delete last</button>
-          <button onClick={handleUndoLast} disabled={loading}>Undo last</button>
+          <button onClick={() => list()} disabled={loading}>
+            Refresh
+          </button>
+          <button onClick={handleDeleteLast} disabled={loading}>
+            Delete last
+          </button>
+          <button onClick={handleUndoLast} disabled={loading}>
+            Undo last
+          </button>
         </div>
       </header>
 
@@ -294,6 +321,7 @@ export default function EventsDevPage() {
           onSuccess={async () => {
             show("Voice command applied");
             await list();
+            await refreshHistory();
           }}
         />
         <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
@@ -351,7 +379,14 @@ export default function EventsDevPage() {
 
       {/* Events list */}
       <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            marginBottom: 6,
+          }}
+        >
           <div style={{ fontSize: 14, opacity: 0.7 }}>Events (GET /api/calendar/list)</div>
         </div>
 
@@ -368,8 +403,21 @@ export default function EventsDevPage() {
             <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
               {events.map((e) => (
                 <li key={e.id} style={{ padding: 16, borderTop: "1px solid #eee" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-                    <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "baseline",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {e.title || "(untitled)"}
                     </div>
                     <div style={{ fontSize: 12, opacity: 0.6 }}>id: {e.id.slice(0, 8)}…</div>
@@ -391,14 +439,44 @@ export default function EventsDevPage() {
       </section>
 
       {/* Raw debug payload */}
-      <details style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+      <details
+        style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}
+      >
         <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600 }}>
           Debug payload (/calendar/list)
         </summary>
-        <pre style={{ marginTop: 12, maxHeight: 288, overflow: "auto", fontSize: 12 }}>
-{JSON.stringify(raw, null, 2)}
+        <pre
+          style={{ marginTop: 12, maxHeight: 288, overflow: "auto", fontSize: 12 }}
+        >
+          {JSON.stringify(raw, null, 2)}
         </pre>
       </details>
+
+      {/* VISUAL-IMPACTING: history panel (Action 15) */}
+      {process.env.NEXT_PUBLIC_SHOW_HISTORY === "true" && (
+        <section
+          style={{
+            border: "1px solid #ddd",
+            borderRadius: 16,
+            padding: 16,
+            marginTop: 16,
+          }}
+        >
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>
+            Recent changes (Action 15)
+          </div>
+          <pre
+            style={{
+              marginTop: 12,
+              maxHeight: 288,
+              overflow: "auto",
+              fontSize: 12,
+            }}
+          >
+            {JSON.stringify(historySample, null, 2)}
+          </pre>
+        </section>
+      )}
 
       {toast}
     </main>
