@@ -150,3 +150,107 @@ Added in update 10-20 : Repo-First Edit: Before any file change, assistant must 
 Visual-Impacting Label: Any change that can affect layout must carry a VISUAL-IMPACTING label and default to “off” until approved.
 Function-Only Patch Mode: When the goal is functional (e.g., confirmation step), edit only the smallest unit that implements that function (here: MicCapture) and do not alter consumer page visuals.
 Import Path Lock: Resolve imports relative to current file; do not introduce new alias paths unless they already exist.
+Permanent fixes (so we don’t repeat this)
+A) One source of truth for routes
+Policy: No inline calendar endpoints in server/main.py. Only server/routes/calendar.py owns /calendar/*.
+Guardrail: add a CI/test that fails if @app.get("/calendar or @app.post("/calendar exists anywhere.
+NEW TEMP TERMINAL (add a quick guard you can run locally)
+grep -Rn '@app\.\(get\|post\)("/calendar' server && echo "DUPLICATE CALENDAR ENDPOINTS FOUND" || echo "OK: no inline calendar endpoints"
+B) Re-entrant locking & no nested locks
+Policy: Use threading.RLock() in any in-memory store.
+Rule: Never call a public API that acquires the lock from within a with _LOCK: block; expose an internal unlocked view (we added _events_json_unlocked).
+C) Zero-friction verification (no curl, no Swagger)
+Policy: Keep a checked-in probe script that exercises the endpoints deterministically with hard timeouts.
+Why: One command, no shell quirks, prints pass/fail immediately.
+🟩 CREATE/EDIT FILE
+Path: server/scripts/probe_history.cjs
+Runs a: create A → create B → history → undo_n → list → replay_n → list → replay_to_ts → history
+Exits non-zero on failure.
+FRONTEND TERMINAL (just creating the file from repo root is fine; label says FRONTEND to keep playbook happy)
+cat > server/scripts/probe_history.cjs <<'JS'
+const http = require('http');
+function req({ method='GET', path='/', body=null, timeoutMs=5000 }) {
+  return new Promise((resolve, reject) => {
+    const opts = { host: '127.0.0.1', port: 8000, path, method, headers: { Connection: 'close', Expect: '' } };
+    let payload = null;
+    if (body) { payload = Buffer.from(JSON.stringify(body)); opts.headers['Content-Type']='application/json'; opts.headers['Content-Length']=Buffer.byteLength(payload); }
+    const t = setTimeout(()=>{ if(sock) sock.destroy(new Error('timeout')); reject(new Error(`timeout ${method} ${path}`)); }, timeoutMs);
+    const r = http.request(opts, res => { let data=''; res.setEncoding('utf8'); res.on('data', c=>data+=c); res.on('end', ()=>{ clearTimeout(t); resolve({status:res.statusCode,data});});});
+    let sock=null; r.on('socket', s=>{ sock=s; s.setNoDelay(true); }); r.on('error', e=>{ clearTimeout(t); reject(e);}); if(payload) r.write(payload); r.end();
+  });
+}
+(async()=>{
+  try{
+    const now=new Date().toISOString();
+    let out=await req({method:'POST',path:'/calendar/mutate',body:{type:'create_event',title:'A',start:now,end:''}}); if(out.status!==200) throw new Error('create A failed'); console.log('CREATE A', out.status);
+    out=await req({method:'POST',path:'/calendar/mutate',body:{type:'create_event',title:'B',start:now,end:''}}); if(out.status!==200) throw new Error('create B failed'); console.log('CREATE B', out.status);
+    out=await req({method:'GET',path:'/calendar/history'}); if(out.status!==200) throw new Error('history after create failed'); console.log('HISTORY 1', out.status);
+    out=await req({method:'POST',path:'/calendar/mutate',body:{op:'undo_n',n:1}}); if(out.status!==200) throw new Error('undo_n failed'); console.log('UNDO_N', out.status);
+    out=await req({method:'GET',path:'/calendar/list'}); if(out.status!==200) throw new Error('list after undo failed'); console.log('LIST 1', out.status, out.data);
+    out=await req({method:'POST',path:'/calendar/mutate',body:{op:'replay_n',n:1}}); if(out.status!==200) throw new Error('replay_n failed'); console.log('REPLAY_N', out.status);
+    out=await req({method:'GET',path:'/calendar/list'}); if(out.status!==200) throw new Error('list after replay failed'); console.log('LIST 2', out.status, out.data);
+    const ts=new Date().toISOString();
+    out=await req({method:'POST',path:'/calendar/mutate',body:{op:'replay_to_ts',ts}}); if(out.status!==200) throw new Error('replay_to_ts failed'); console.log('REPLAY_TO_TS', out.status);
+    out=await req({method:'GET',path:'/calendar/history'}); if(out.status!==200) throw new Error('history final failed'); console.log('HISTORY 2', out.status);
+    console.log('PROBE OK');
+    process.exit(0);
+  }catch(e){ console.error('PROBE FAIL', e.message||e); process.exit(1); }
+})();
+JS
+💻 NEW TEMP TERMINAL — run the probe (backend KEEP RUNNING)
+node server/scripts/probe_history.cjs
+This is the only command you need next time to prove backend behavior after a change.
+D) Add a real healthcheck that exercises POST, not just GET
+Policy: /healthz must accept a tiny POST {op:"noop"} and return 200 quickly.
+That gives you one universal “am I alive for POST?” check (works from any tool).
+NEW TEMP TERMINAL (tiny router addition)
+cat > server/routes/health.py <<'PY'
+from fastapi import APIRouter
+router = APIRouter()
+@router.get("/healthz")
+def g(): return {"ok": True}
+@router.post("/healthz")
+def p(): return {"ok": True}
+PY
+NEW TEMP TERMINAL (mount it)
+python - <<'PY'
+from pathlib import Path
+p=Path("server/main.py")
+s=p.read_text()
+if "from server.routes import health" not in s:
+    s=s.replace("from server.routes import calendar", "from server.routes import calendar\nfrom server.routes import health")
+if "app.include_router(health.router)" not in s:
+    s=s.replace("app.include_router(calendar.router)", "app.include_router(calendar.router)\napp.include_router(health.router)")
+p.write_text(s)
+print("mounted /healthz")
+PY
+Now you can always do:
+node -e "fetch('http://127.0.0.1:8000/healthz',{method:'POST'}).then(r=>r.text()).then(console.log)"
+E) CWD discipline (playbook pin)
+BACKEND TERMINAL must be repo root; FRONTEND TERMINAL must be frontend/.
+Put this in your shell profile to warn you if you’re in the wrong place:
+NEW TEMP TERMINAL
+cat >> ~/.zshrc <<'Z'
+function vc_cwd_guard() {
+  if [[ "$1" == "backend" && ! -f server/main.py ]]; then echo "Not repo root (backend). cd to voice-calendar-proto/"; return 1; fi
+  if [[ "$1" == "frontend" && ! -d frontend ]]; then echo "Not at repo root/has frontend dir."; return 1; fi
+}
+Z
+The minimal “Change → Verify” protocol (copy/paste next time)
+STOP BACKEND (Ctrl+C in BACKEND TERMINAL)
+START BACKEND (repo root)
+source .venv/bin/activate
+export AUTH_BYPASS=1
+python -m uvicorn server.main:app --host 127.0.0.1 --port 8000 --reload --log-level debug --reload-dir server
+VERIFY (single command)
+node server/scripts/probe_history.cjs
+COMMIT
+git add -A
+git commit -m "Action XX: <short desc>; probe_history OK"
+No curl. No Swagger. No ambiguity.
+What I’ll do differently
+Default to surgical edits only (never shrink a large file unless absolutely necessary).
+Provide a single deterministic probe script with every backend change.
+Add a quick route-conflict guard and healthz POST as standard practice.
+Keep responses terse and focused on “Change → Verify,” not tool troubleshooting.
+If you want, I can bundle the guard checks + probe into a tiny make verify-backend or npm run probe:backend script so it’s one muscle-memory command.
