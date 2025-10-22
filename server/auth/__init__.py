@@ -1,60 +1,52 @@
-# server/auth/__init__.py
 from __future__ import annotations
 import os
-from typing import Optional, Any, Dict
-
+from typing import Optional
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-try:
-    import jwt  # PyJWT
-except Exception as e:
-    raise RuntimeError("PyJWT is required. Install with: python -m pip install pyjwt") from e
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import jwt
 
 _bearer = HTTPBearer(auto_error=False)
 
-class AuthUser(Dict[str, Any]):
-    @property
-    def sub(self) -> str:
-        return self.get("sub", "")
+class AuthUser:
+    def __init__(self, sub: str, email: Optional[str] = None):
+        self.sub = sub
+        self._email = email
+
     @property
     def email(self) -> Optional[str]:
-        return self.get("email")
+        return self._email
+
+def _bypass_on() -> bool:
+    req = (os.getenv("AUTH_REQUIRED") or "").strip().lower() in {"1", "true", "yes"}
+    if req:
+        return False
+    v = (os.getenv("AUTH_BYPASS") or "").strip().lower()
+    return v in {"1", "true", "yes", "y"}
 
 def _bypass_user() -> AuthUser:
     return AuthUser(sub="dev-bypass", email="dev@local")
 
-def _bypass_on() -> bool:
-    v = (os.getenv("AUTH_BYPASS") or "").strip().lower()
-    return v in {"1", "true", "yes"}
-
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer)) -> AuthUser:
-    """
-    Dev (AUTH_BYPASS=true/yes/1): always return a stub user and never raise.
-    Prod: require Bearer token and validate HS256 using SUPABASE_JWT_SECRET.
-    """
     if _bypass_on():
-        # ensure code that checks for a secret sees a value
         os.environ.setdefault("SUPABASE_JWT_SECRET", "dev")
         return _bypass_user()
 
-    if credentials is None or not credentials.scheme or not credentials.credentials:
+    if not credentials or (credentials.scheme or "").lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    token = credentials.credentials or ""
     secret = os.getenv("SUPABASE_JWT_SECRET")
     if not secret:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Server auth not configured",
         )
 
-    token = credentials.credentials
     try:
-        # Supabase issues HS256 tokens. No audience verification needed for local dev.
         payload = jwt.decode(token, secret, algorithms=["HS256"], options={"verify_aud": False})
     except jwt.PyJWTError:
         raise HTTPException(
@@ -63,9 +55,12 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    sub = payload.get("sub") or payload.get("user_id") or ""
+    sub = payload.get("sub") or payload.get("user_id")
     email = payload.get("email")
     if not sub:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing sub")
-
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token: no sub",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return AuthUser(sub=sub, email=email)
