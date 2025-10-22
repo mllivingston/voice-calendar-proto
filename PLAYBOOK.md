@@ -311,3 +311,68 @@ Visual risk increases with file size	Always measure LOC and tag Visual-Impacting
 | 1 | 2 | 2 | 0 | SQLite store |
 | 2 | 1 | 1 | 0 | Affordances + tests |
 | Total | 4 | 4 | 0 | Velocity ≈ 4 units/session |
+## 🔒 Reliability & Scoping Rules (Post Phases 0–2)
+Path: PLAYBOOK.md
+Reason: Consolidate the new reliability rules (from Phases 0–2) and add a streamlined Git protocol so doc changes never waste time again. Paste this whole section near your existing “Editing Protocol”.
+## 🔒 Reliability & Scoping Rules (Post Phases 0–2)
+
+### 1) Critical-File Protection
+- **Pre-check before edit:** open file first; note line count and any permission-gated handlers.
+- **Edit modes:** Default **FOP (Function-Only Patch)** = no JSX/layout or event-binding changes. Use **VI (Visual-Impacting)** only with screenshots.
+- **Immutable entrypoints:** Never change mic permission triggers (Start/Record/Stop) unless the *explicit* goal is ASR/mic work.
+- **Rollback line:** Every change to a CRITICAL file includes `git restore --source=HEAD -- <path>` in the chat.
+
+### 2) Scoping & Velocity
+- **S (1 unit):** ≤50 LOC, single-file, no layout impact.  
+- **M (2 units):** spans FE/BE with minimal tests.  
+- **L (3–4 units):** cross-system or multi-turn UI.
+- **Velocity:** Units completed per session. Baseline from Phases 0–2: **4 units/session**.
+
+### 3) Phase Review Discipline
+After each phase ship:
+1) Outcome log (what passed/broke and why)  
+2) Risk register (fragile areas)  
+3) Scope variance (est vs actual, ±1 OK)  
+4) New rule(s) added here if we caused a regression
+
+### 4) Tests & Commits
+- **Pre-commit must pass:** `pytest` (≥1 test) and frontend smoke (`node frontend/scripts/smoke-list.mjs`).
+- **Commit template:**
+Phase X: <scope>
+bullets...
+(N units, <FOP|VI>, critical files: [..] or none)
+
+### 5) Learnings → Rules (from 0–2)
+| Lesson | Rule |
+|---|---|
+| Safari mic permissions are fragile | Don’t touch Start/Record/Stop in FOP edits |
+| Interpreter may return NOOP | Keep client simple; fix in server clarify/coercion |
+| Title normalization placement | Only between **interpret → confirm** |
+
+### 6) Velocity Tracking
+| Phase | Est | Actual | Δ | Notes |
+| 0 | 1 | 1 | 0 | Flags |
+| 1 | 2 | 2 | 0 | SQLite + auth gate |
+| 2 | 1 | 1 | 0 | Affordances + tests |
+| Total | 4 | 4 | 0 | ≈4 units/session |
+
+---
+
+## 🧭 Docs & Playbook Update Protocol (Instant)
+
+### Fast Path A — with `gh` (recommended; protected `main`)
+1) Ensure `PLAYBOOK.md` is edited and saved.  
+2) Run the helper script:
+scripts/doc-update.sh
+This will: create a docs branch → push → open PR → squash-merge → return you to `main`.
+
+### Fast Path B — no `gh`
+1) Create a short-lived docs branch, commit, and push.  
+2) Open the browser PR link and merge there.  
+3) `git switch main && git pull --ff-only`.
+
+### Preflight (any path)
+- If other unrelated local edits exist, stash them first:
+git stash push -m "wip: hold local edits"
+- Pop them after the docs merge if needed:
+git stash pop
