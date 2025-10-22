@@ -254,3 +254,60 @@ Provide a single deterministic probe script with every backend change.
 Add a quick route-conflict guard and healthz POST as standard practice.
 Keep responses terse and focused on “Change → Verify,” not tool troubleshooting.
 If you want, I can bundle the guard checks + probe into a tiny make verify-backend or npm run probe:backend script so it’s one muscle-memory command.
+🔒 New Development Rules — Reliability & Scoping Update (Post Phases 0-2)
+1 — Critical-File Protection
+Pre-Check Before Edit
+Always open the existing file via Cursor or connector first.
+Record its line count, visual footprint (header/nav presence), and any functions tied to hardware/browser permissions.
+If the file controls user permissions, mic, or camera (e.g. MicCapture.tsx), mark it CRITICAL in the PR description.
+Edit Modes
+Function-Only Patch (FOP): Allowed only when adding a helper, hook, or utility; no JSX layout changes, no event-binding changes.
+Visual-Impacting (VI): Must include explicit before/after screenshots in the PR description.
+Default to FOP; upgrade to VI only with visible UI intent.
+Immutable Entrypoints
+Start, Stop, Record, and Permission handlers are off-limits unless the goal is mic/ASR debugging.
+These must remain callable user gestures to preserve Safari and Chrome permission flows.
+Rollback Path
+Every edit to a CRITICAL file must include a one-line rollback command in the chat output
+git restore --source=HEAD -- path/to/file.
+2 — Scoping & Velocity Framework
+Scale	Meaning	Expected Work	Example
+S	Small (1 unit)	Single file change ≤ 50 LOC, no layout impact	Add flag to env echo route
+M	Medium (2 units)	Feature spanning backend + frontend with tests	Durable SQLite store + auth gate
+L	Large (3–4 units)	Cross-system change or multi-phase UI feature	Dialog manager or streaming ASR
+Velocity formula: Units / Session.
+Use completed phases as baseline (4 units in 1 session = ≈4 units per session).
+3 — Phase Review Discipline
+After each phase:
+Outcome Log: 1 paragraph on what passed, what broke, why.
+Risk Register: List new fragile areas (e.g., Safari mic permissions).
+Scope Variance: Note planned vs. actual units; explain variance (±1 unit is OK).
+Rule Feedback: If a regression occurred, add a “Why it broke” note (see example from Phase 1–2) and update this section before continuing.
+4 — Testing & Commit Requirements
+Pre-Commit Tests
+Backend pytest must pass with 1 passed minimum.
+Frontend node frontend/scripts/smoke-list.mjs must return “ok”.
+Never commit if either fails.
+Commit Message Template
+Phase X: <scope>
+- Phase 0 flags and gates
+- Phase 1 auth + durable store
+- Phase 2 UI affordances + tests
+(n units, no layout changes)
+PR Labeling
+[SAFE-PATCH] for Function-Only edits.
+[VISUAL-IMPACTING] for layout or CSS changes.
+[CRITICAL-FILE] if editing mic/audio routines.
+5 — Learning Archive (from Phases 0–2)
+Lesson	Implementation Rule
+Mic permission path is fragile	Never edit Start/Record handlers outside dedicated mic phase.
+Interpreter can return NOOP	Keep client simple; add clarify/coercion server-side.
+Title normalization belongs post-interpret	All semantic repairs live between interpret and confirm only.
+Visual risk increases with file size	Always measure LOC and tag Visual-Impacting if > 200 LOC.
+6 — Velocity Tracking Template (Markdown snippet)
+| Phase | Est Units | Actual | Δ | Notes |
+|:--|:--|:--|:--|:--|
+| 0 | 1 | 1 | 0 | Env flags |
+| 1 | 2 | 2 | 0 | SQLite store |
+| 2 | 1 | 1 | 0 | Affordances + tests |
+| Total | 4 | 4 | 0 | Velocity ≈ 4 units/session |
