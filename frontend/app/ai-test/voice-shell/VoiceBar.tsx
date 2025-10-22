@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { interpret, mutate } from "../../../lib/ai";
 import { speak, cancelSpeech } from "../../../lib/speak";
+import { getAccessToken } from "../../../lib/authToken";
 
 type Status = "idle" | "listening" | "thinking" | "speaking" | "error";
 
@@ -10,7 +11,9 @@ export default function VoiceBar() {
   const [status, setStatus] = useState<Status>("idle");
   const [lastText, setLastText] = useState<string>("");
   const recRef = useRef<SpeechRecognition | null>(null);
-  const supported = typeof window !== "undefined" && ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
+  const supported =
+    typeof window !== "undefined" &&
+    (("SpeechRecognition" in window) || ("webkitSpeechRecognition" in window));
 
   useEffect(() => {
     if (!supported) return;
@@ -19,31 +22,42 @@ export default function VoiceBar() {
     r.continuous = false;
     r.interimResults = false;
     r.lang = navigator.language || "en-US";
+
     r.onresult = async (e: SpeechRecognitionEvent) => {
       const text = Array.from(e.results).map(r => r[0].transcript).join(" ").trim();
       setLastText(text);
       setStatus("thinking");
       try {
-        const interp = await interpret({ text });
-        const cmd = (interp?.command ?? interp?.cmd ?? interp) as any;
-        const res = await mutate(cmd);
+        // NEW: fetch token and forward it
+        const token = await getAccessToken();
+
+        // Pass a STRING to interpret (helpers unwrap internally if needed)
+        const interp = await interpret(text, token);
+        const cmd = (interp && (interp as any).command) ? (interp as any).command : interp;
+
+        // Mutate with token; expect a diff when backend succeeds
+        await mutate(cmd, token);
+
         setStatus("speaking");
         speak("Okay. Done.");
-        // leave status as speaking briefly; return to idle later
         setTimeout(() => setStatus("idle"), 1200);
-      } catch (err) {
+      } catch (err: any) {
         setStatus("error");
+        // Keep message user-friendly; devs can check console for details
         speak("Sorry, I couldn't do that.");
         setTimeout(() => setStatus("idle"), 1200);
       }
     };
+
     r.onerror = () => {
       setStatus("error");
       setTimeout(() => setStatus("idle"), 800);
     };
+
     r.onend = () => {
       if (status === "listening") setStatus("idle");
     };
+
     recRef.current = r;
     return () => {
       try { r.abort(); } catch {}
@@ -68,7 +82,6 @@ export default function VoiceBar() {
     try { recRef.current.stop(); } catch {}
   };
 
-  // Minimal, unobtrusive bar that won’t affect existing layouts when embedded
   return (
     <div style={{
       position: "fixed",
@@ -88,12 +101,8 @@ export default function VoiceBar() {
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <StatusDot status={status} />
-        <div style={{ fontSize: 12, opacity: 0.7 }}>
-          {supported ? (status === "idle" ? "Press and speak" :
-            status === "listening" ? "Listening…" :
-            status === "thinking" ? "Thinking…" :
-            status === "speaking" ? "Speaking…" :
-            "Error") : "Browser voice not available"}
+        <div style={{ fontSize: 12, opacity: 0.75 }}>
+          {labelForStatus(status, supported)}
           {lastText && status !== "listening" && (
             <span style={{ marginLeft: 8, opacity: 0.6 }}>“{lastText}”</span>
           )}
@@ -140,4 +149,15 @@ function StatusDot({ status }: { status: Status }) {
       }}
     />
   );
+}
+
+function labelForStatus(s: Status, supported: boolean) {
+  if (!supported) return "Browser voice not available";
+  switch (s) {
+    case "idle": return "Press and speak";
+    case "listening": return "Listening…";
+    case "thinking": return "Thinking…";
+    case "speaking": return "Speaking…";
+    case "error": return "Something went wrong";
+  }
 }
