@@ -19,6 +19,12 @@ type EventItem = {
   [k: string]: any;
 };
 
+type Diff =
+  | { type: "create"; event: EventItem }
+  | { type: "update"; event: EventItem }
+  | { type: "delete"; id: string }
+  | { type: "noop" };
+
 type ListResponse = EventItem[] | { events?: EventItem[] } | Record<string, any>;
 
 function normalizeToArray(data: ListResponse): EventItem[] {
@@ -163,13 +169,12 @@ export default function EventsDevPage() {
           }),
         });
         const ok = res.ok;
-        const j = await res.json().catch(() => ({}));
-        setRaw(j);
+        await res.text().catch(() => "");
         if (!ok) {
           setError(`create failed ${res.status}`);
           return;
         }
-        show("Created");
+        show("Event created");
         setTitle("");
         setStartLocal("");
         setEndLocal("");
@@ -180,12 +185,16 @@ export default function EventsDevPage() {
         setLoading(false);
       }
     },
-    [title, startLocal, endLocal, list, show]
+    [title, startLocal, endLocal, list]
   );
 
   /** ---- delete last ---- */
   const handleDeleteLast = useCallback(async () => {
     setError(null);
+    if (!events.length) {
+      show("No events to delete");
+      return;
+    }
     setLoading(true);
     try {
       const headers = await authHeader();
@@ -195,20 +204,19 @@ export default function EventsDevPage() {
         body: JSON.stringify({ op: "delete_last" }),
       });
       const ok = res.ok;
-      const j = await res.json().catch(() => ({}));
-      setRaw(j);
+      await res.text().catch(() => "");
       if (!ok) {
         setError(`delete failed ${res.status}`);
         return;
       }
-      show("Deleted last");
+      show("Deleted last event");
       await list();
     } catch {
       setError("delete failed");
     } finally {
       setLoading(false);
     }
-  }, [list, show]);
+  }, [events, list, show]);
 
   /** ---- undo last ---- */
   const handleUndoLast = useCallback(async () => {
@@ -236,71 +244,47 @@ export default function EventsDevPage() {
     }
   }, [list, show]);
 
-  /** ---- move last +30m (conservative: delete_last → re-create shifted) ---- */
-  const handleMoveLastPlus30 = useCallback(async () => {
-    if (!events.length) return;
-    // newest by created_at if present, else last in array
-    const sorted = [...events].sort((a, b) => {
-      const aa = a.created_at || "";
-      const bb = b.created_at || "";
-      if (aa && bb) return aa < bb ? -1 : 1;
-      return 0;
-    });
-    const last = sorted[sorted.length - 1] || events[events.length - 1];
-    if (!last?.start || !last?.end) return;
-
-    setError(null);
-    setLoading(true);
-    try {
-      const headers = await authHeader();
-      // delete last
-      await fetch("/api/calendar/mutate", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ op: "delete_last" }),
-      });
-
-      // re-create shifted +30m
-      const s = new Date(last.start);
-      const e = new Date(last.end);
-      const s2 = new Date(s.getTime() + 30 * 60 * 1000);
-      const e2 = new Date(e.getTime() + 30 * 60 * 1000);
-
-      const res2 = await fetch("/api/calendar/mutate", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          type: "create_event",
-          title: last.title || "(moved)",
-          start: s2.toISOString(),
-          end: e2.toISOString(),
-        }),
-      });
-
-      const j2 = await res2.json().catch(() => ({}));
-      setRaw(j2);
-      if (!res2.ok) {
-        setError(`move failed ${res2.status}`);
-        return;
-      }
-      show("Moved last +30m");
-      await list();
-    } catch {
-      setError("move failed");
-    } finally {
-      setLoading(false);
+  /** ---- apply diff (Phase 5: live reflection) ---- */
+  const applyDiff = useCallback((diff: Diff | undefined | null) => {
+    if (!diff) return;
+    if (diff.type === "create" && (diff as any).event) {
+      setEvents((prev) => [((diff as any).event), ...prev]);
+      return;
     }
-  }, [events, list, show]);
+    if (diff.type === "update" && (diff as any).event) {
+      const ev = (diff as any).event as EventItem;
+      setEvents((prev) => prev.map((e) => (e.id === ev.id ? ev : e)));
+      return;
+    }
+    if (diff.type === "delete" && (diff as any).id) {
+      const id = (diff as any).id as string;
+      setEvents((prev) => prev.filter((e) => e.id !== id));
+      return;
+    }
+    // noop → nothing
+  }, []);
 
+  /** ---- initial load ---- */
   useEffect(() => {
     list();
   }, [list]);
 
-  const hasEvents = events.length > 0;
+  /** ---- subscribe to Voice Shell diffs (Phase 5) ---- */
+  useEffect(() => {
+    function onDiff(e: any) {
+      const d: Diff | undefined = e?.detail?.diff;
+      if (d) applyDiff(d);
+    }
+    window.addEventListener("calendar:diff", onDiff);
+    return () => window.removeEventListener("calendar:diff", onDiff);
+  }, [applyDiff]);
 
   /** -----------------------
-   * Render (matches Action-12 layout)
+   * Render (Action-12 layout preserved)
    * ----------------------*/
+  const hasEvents = events.length > 0;
+  const labelStyle: React.CSSProperties = { fontSize: 12, opacity: 0.7 };
+
   return (
     <main style={{ maxWidth: 840, margin: "0 auto", padding: 24 }}>
       {/* Dev header nav */}
@@ -316,7 +300,10 @@ export default function EventsDevPage() {
           borderBottom: "1px dashed #e5e7eb",
         }}
       >
-        <a href="/ai-test" style={{ fontSize: 13, textDecoration: "none" }}>
+        <a
+          href="/ai-test"
+          style={{ fontSize: 13, fontWeight: 700, textDecoration: "none" }}
+        >
           Voice Console (dev)
         </a>
         <span style={{ opacity: 0.4 }}>•</span>
@@ -335,100 +322,73 @@ export default function EventsDevPage() {
           <button onClick={() => list()} disabled={loading}>Refresh</button>
           <button onClick={handleDeleteLast} disabled={loading}>Delete last</button>
           <button onClick={handleUndoLast} disabled={loading}>Undo last</button>
-          <button onClick={handleMoveLastPlus30} disabled={loading}>Move last +30m</button>
         </div>
       </header>
+
+      {/* Quick Create */}
+      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>+ New</div>
+        <form onSubmit={handleCreate} style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr 1fr auto", alignItems: "end" }}>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={labelStyle}>Title</span>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Team sync" />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={labelStyle}>Start</span>
+            <input type="datetime-local" value={startLocal} onChange={(e) => setStartLocal(e.target.value)} />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={labelStyle}>End</span>
+            <input type="datetime-local" value={endLocal} onChange={(e) => setEndLocal(e.target.value)} />
+          </label>
+          <button type="submit" disabled={loading}>Create</button>
+        </form>
+        {error && <div style={{ marginTop: 8, color: "#b91c1c" }}>{error}</div>}
+      </section>
+
+      {/* Event list */}
+      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Events (GET /api/calendar/list)</div>
+        {hasEvents ? (
+          <ul style={{ display: "grid", gap: 12 }}>
+            {events.map((e) => (
+              <li key={e.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                <div style={{ fontWeight: 600 }}>{e.title || "(untitled)"}</div>
+                <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+                  {e.start ? <span>Start: {formatLocal(e.start)}</span> : null}
+                  {e.end ? <span style={{ marginLeft: 12 }}>End: {formatLocal(e.end)}</span> : null}
+                </div>
+                {e.created_at ? (
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>Created: {formatLocal(e.created_at)}</div>
+                ) : null}
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>id: {e.id}</div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div style={{ fontSize: 13, opacity: 0.7 }}>(no events)</div>
+        )}
+      </section>
 
       {/* Voice Commands on Events page */}
       <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
         <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Voice Commands</div>
         <MicCapture
-          onSuccess={async () => {
-            show("Voice command applied");
-            await list();
-          }}
+          onSuccess={async () => { show("Voice command applied"); await list(); }}
+          onCreate={async () => { show("Event created"); await list(); }}
+          onDelete={async () => { show("Deleted last event"); await list(); }}
         />
         <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
           Tip: After any voice action, the list refreshes automatically.
         </div>
       </section>
 
-      {/* Quick Create */}
-      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Quick Create</div>
-        <form onSubmit={handleCreate} style={{ display: "grid", gap: 12 }}>
-          <input
-            placeholder="Title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
-          />
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <input
-              type="datetime-local"
-              value={startLocal}
-              onChange={(e) => setStartLocal(e.target.value)}
-              style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
-            />
-            <input
-              type="datetime-local"
-              value={endLocal}
-              onChange={(e) => setEndLocal(e.target.value)}
-              style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
-            />
-          </div>
-          <div>
-            <button disabled={loading}>Create event</button>
-          </div>
-        </form>
-      </section>
-
-      {/* Errors */}
-      {error && (
-        <div
-          style={{
-            border: "1px solid #fecaca",
-            background: "#fee2e2",
-            color: "#991b1b",
-            borderRadius: 12,
-            padding: 12,
-            marginTop: 16,
-            fontSize: 14,
-          }}
-        >
-          Error: {error}
-        </div>
-      )}
-
-      {/* Events list */}
-      <section style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
-          <div style={{ fontSize: 14, opacity: 0.7 }}>Events (GET /api/calendar/list)</div>
-        </div>
-
-        {!hasEvents ? (
-          <div style={{ fontSize: 14, opacity: 0.7 }}>(no events)</div>
-        ) : (
-          <ul className="space-y-2">
-            {events.map((e) => (
-              <li key={e.id} className="rounded-xl border p-3">
-                <div className="font-medium">{e.title || "(untitled)"}</div>
-                <div className="text-sm" style={{ opacity: 0.7 }}>
-                  {formatLocal(e.start)} → {formatLocal(e.end)}
-                </div>
-                <div className="mt-1 text-xs font-mono break-all" style={{ opacity: 0.6 }}>
-                  {e.id}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* Raw payload for debugging */}
-      <details style={{ marginTop: 16 }}>
-        <summary className="cursor-pointer text-sm text-gray-600">Raw list response</summary>
-        <pre className="text-xs overflow-auto border rounded bg-gray-50 p-2">{JSON.stringify(raw, null, 2)}</pre>
+      {/* Raw debug */}
+      <details style={{ border: "1px solid #ddd", borderRadius: 16, padding: 16, marginTop: 16 }}>
+        <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600 }}>Debug payload (/calendar/list)</summary>
+        <pre style={{ marginTop: 12, maxHeight: 288, overflow: "auto", fontSize: 12 }}>
+{JSON.stringify(raw, null, 2)}
+        </pre>
       </details>
 
       {toast}
