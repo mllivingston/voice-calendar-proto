@@ -11,9 +11,25 @@ export default function VoiceBar() {
   const [status, setStatus] = useState<Status>("idle");
   const [lastText, setLastText] = useState<string>("");
   const recRef = useRef<SpeechRecognition | null>(null);
+  const bcRef = useRef<BroadcastChannel | null>(null);
+
   const supported =
     typeof window !== "undefined" &&
     (("SpeechRecognition" in window) || ("webkitSpeechRecognition" in window));
+
+  // Init cross-tab channel
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      bcRef.current = new BroadcastChannel("calendar");
+    } catch {
+      bcRef.current = null;
+    }
+    return () => {
+      try { bcRef.current?.close(); } catch {}
+      bcRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (!supported) return;
@@ -28,53 +44,49 @@ export default function VoiceBar() {
       setLastText(text);
       setStatus("thinking");
       try {
-        // NEW: fetch token and forward it
         const token = await getAccessToken();
 
-        // Pass a STRING to interpret (helpers unwrap internally if needed)
+        // 1) Interpret (STRING)
         const interp = await interpret(text, token);
         const cmd = (interp && (interp as any).command) ? (interp as any).command : interp;
 
-        // Mutate with token; expect a diff when backend succeeds
-        await mutate(cmd, token);
+        // 2) Mutate
+        const result = await mutate(cmd, token);
 
+        // 3) Notify listeners (same-tab + cross-tab)
+        if (result?.diff) {
+          // same-tab event (Phase 5)
+          window.dispatchEvent(new CustomEvent("calendar:diff", { detail: { diff: result.diff } }));
+          // cross-tab (Phase 5.2)
+          try { bcRef.current?.postMessage({ type: "diff", diff: result.diff }); } catch {}
+        } else {
+          window.dispatchEvent(new CustomEvent("calendar:refresh"));
+          try { bcRef.current?.postMessage({ type: "refresh" }); } catch {}
+        }
+
+        // 4) TTS
         setStatus("speaking");
         speak("Okay. Done.");
         setTimeout(() => setStatus("idle"), 1200);
-      } catch (err: any) {
+      } catch {
         setStatus("error");
-        // Keep message user-friendly; devs can check console for details
         speak("Sorry, I couldn't do that.");
         setTimeout(() => setStatus("idle"), 1200);
       }
     };
 
-    r.onerror = () => {
-      setStatus("error");
-      setTimeout(() => setStatus("idle"), 800);
-    };
-
-    r.onend = () => {
-      if (status === "listening") setStatus("idle");
-    };
+    r.onerror = () => { setStatus("error"); setTimeout(() => setStatus("idle"), 800); };
+    r.onend = () => { if (status === "listening") setStatus("idle"); };
 
     recRef.current = r;
-    return () => {
-      try { r.abort(); } catch {}
-    };
+    return () => { try { r.abort(); } catch {} };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supported]);
 
   const start = () => {
     if (!supported || !recRef.current) return;
     cancelSpeech(); // soft barge-in
-    try {
-      setStatus("listening");
-      recRef.current.start();
-    } catch {
-      setStatus("error");
-      setTimeout(() => setStatus("idle"), 800);
-    }
+    try { setStatus("listening"); recRef.current.start(); } catch { setStatus("error"); setTimeout(() => setStatus("idle"), 800); }
   };
 
   const stop = () => {

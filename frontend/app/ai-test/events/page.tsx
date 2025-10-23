@@ -269,15 +269,47 @@ export default function EventsDevPage() {
     list();
   }, [list]);
 
-  /** ---- subscribe to Voice Shell diffs (Phase 5) ---- */
+  /** ---- same-tab events (Phase 5) ---- */
   useEffect(() => {
     function onDiff(e: any) {
       const d: Diff | undefined = e?.detail?.diff;
       if (d) applyDiff(d);
     }
+    function onRefresh() {
+      list();
+    }
     window.addEventListener("calendar:diff", onDiff);
-    return () => window.removeEventListener("calendar:diff", onDiff);
-  }, [applyDiff]);
+    window.addEventListener("calendar:refresh", onRefresh);
+    return () => {
+      window.removeEventListener("calendar:diff", onDiff);
+      window.removeEventListener("calendar:refresh", onRefresh);
+    };
+  }, [applyDiff, list]);
+
+  /** ---- NEW: cross-tab events (Phase 5.2) ---- */
+  useEffect(() => {
+    if (typeof window === "undefined" || !("BroadcastChannel" in window)) return;
+    let ch: BroadcastChannel | null = null;
+    try {
+      ch = new BroadcastChannel("calendar");
+      const onMessage = (ev: MessageEvent) => {
+        const data = ev.data;
+        if (!data || typeof data !== "object") return;
+        if (data.type === "diff" && data.diff) {
+          applyDiff(data.diff as Diff);
+        } else if (data.type === "refresh") {
+          list();
+        }
+      };
+      ch.addEventListener("message", onMessage);
+      return () => {
+        try { ch?.removeEventListener("message", onMessage); ch?.close(); } catch {}
+      };
+    } catch {
+      // ignore
+      return;
+    }
+  }, [applyDiff, list]);
 
   /** -----------------------
    * Render (Action-12 layout preserved)
