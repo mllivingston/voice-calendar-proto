@@ -4,7 +4,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "playwright test",
+    "smoke:refactor": "playwright test frontend/tests/smoke"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.74.0",
@@ -14,6 +16,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@playwright/test": "^1.48.2",
     "@tailwindcss/postcss": "^4.1.14",
     "@types/node": "20.11.24",
     "@types/react": "18.2.79",
